@@ -13,9 +13,11 @@ import multiprocessing as mp
 import queue
 import shutil
 import struct
+import tempfile
 import time
+import uuid
 import zlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +31,7 @@ from .pbar import Progress
 from .utils import _read_exact, ceil_div, human_readable_size, read_param_json
 
 PFSC_PROGRESS_REPORT_BYTES: int = consts.PFSC_LOGICAL_BLOCK_SIZE * 16
+PFSC_SINGLE_FILE_PARALLEL_MIN_SIZE: int = 256 * 1024 * 1024
 
 
 class SupportsIntQueue(Protocol):
@@ -684,7 +687,8 @@ class FileNode:
     parent_rel_dir: str
     name: str
     raw_size: int
-    stored_payload: bytes = b""
+    stored_source_path: Path | None = None
+    stored_source_is_temp: bool = False
     stored_size: int = 0
     compressed: bool = False
     gain_pct: float = 0.0
@@ -881,6 +885,376 @@ def encode_pfsc_payload(
     return encoded_payload, effective_gain_pct, hypothetical_all_compressed_size
 
 
+def _make_compression_spool_path(*, source_path: Path) -> Path:
+    """Build a unique temporary spool path for a compressed payload.
+
+    Args:
+        source_path: Source file path used only for naming context.
+
+    Returns:
+        A unique path under the system temporary directory.
+    """
+    suffix: str = uuid.uuid4().hex
+    safe_name: str = source_path.name.replace(" ", "_")
+    temp_root: Path = Path(tempfile.gettempdir())
+    return temp_root / f"mkpfs-{safe_name}.{suffix}.pfsc"
+
+
+def resolve_block_compression_worker_count(*, requested_cpu_count: int, file_size: int) -> int:
+    """Resolve block-level worker count for one file compression workload.
+
+    Args:
+        requested_cpu_count: Requested CPU budget for compression.
+        file_size: Raw file size in bytes.
+
+    Returns:
+        Effective block worker count. Returns ``1`` when the file is below the
+        single-file block-parallel threshold.
+
+    Raises:
+        ValueError: If ``requested_cpu_count`` is negative or ``file_size`` is negative.
+    """
+    if requested_cpu_count < 0:
+        raise ValueError(f"requested_cpu_count must be non-negative, got {requested_cpu_count}")
+    if file_size < 0:
+        raise ValueError(f"file_size must be non-negative, got {file_size}")
+    if file_size < PFSC_SINGLE_FILE_PARALLEL_MIN_SIZE:
+        return 1
+    return max(1, requested_cpu_count)
+
+
+def _iter_pfsc_block_worker_args(
+    *,
+    abs_path: Path,
+    block_count: int,
+    logical_block_size: int,
+    zlib_level: int,
+) -> Iterator[tuple[Path, int, int, int]]:
+    """Yield block worker arguments for one file in logical block order."""
+    block_index: int
+    for block_index in range(block_count):
+        block_offset: int = block_index * logical_block_size
+        yield abs_path, block_offset, logical_block_size, zlib_level
+
+
+def _compress_pfsc_block_lengths_worker(args: tuple[Path, int, int, int]) -> tuple[int, int]:
+    """Compress one logical block and return raw/compressed lengths.
+
+    Args:
+        args: Tuple ``(abs_path, block_offset, logical_block_size, zlib_level)``.
+
+    Returns:
+        Tuple ``(raw_block_length, compressed_block_length)``.
+    """
+    abs_path: Path
+    block_offset: int
+    logical_block_size: int
+    zlib_level: int
+    (abs_path, block_offset, logical_block_size, zlib_level) = args
+    raw_chunk: bytes
+    with abs_path.open("rb") as source_file:
+        source_file.seek(block_offset)
+        raw_chunk = source_file.read(logical_block_size)
+    padded_chunk: bytes = raw_chunk.ljust(logical_block_size, b"\x00")
+    compressed_chunk: bytes = zlib.compress(padded_chunk, level=zlib_level)
+    return len(raw_chunk), len(compressed_chunk)
+
+
+def _compress_pfsc_block_payload_worker(args: tuple[Path, int, int, int]) -> tuple[bytes, bytes]:
+    """Compress one logical block and return raw/compressed payload bytes.
+
+    Args:
+        args: Tuple ``(abs_path, block_offset, logical_block_size, zlib_level)``.
+
+    Returns:
+        Tuple ``(raw_chunk, compressed_chunk)``.
+    """
+    abs_path: Path
+    block_offset: int
+    logical_block_size: int
+    zlib_level: int
+    (abs_path, block_offset, logical_block_size, zlib_level) = args
+    raw_chunk: bytes
+    with abs_path.open("rb") as source_file:
+        source_file.seek(block_offset)
+        raw_chunk = source_file.read(logical_block_size)
+    padded_chunk: bytes = raw_chunk.ljust(logical_block_size, b"\x00")
+    compressed_chunk: bytes = zlib.compress(padded_chunk, level=zlib_level)
+    return raw_chunk, compressed_chunk
+
+
+def _analyze_pfsc_file_storage(
+    *,
+    abs_path: Path,
+    threshold_gain: int,
+    zlib_level: int,
+    logical_block_size: int,
+    block_worker_count: int = 1,
+    progress_callback: Callable[[int], None] | None = None,
+) -> tuple[int, bool, float, int]:
+    """Analyze PFSC storage choice for a file without creating output payload bytes.
+
+    Args:
+        abs_path: Source file path.
+        threshold_gain: Minimum per-block gain percent to keep compressed bytes.
+        zlib_level: zlib compression level.
+        logical_block_size: PFSC logical block size.
+        block_worker_count: Number of worker processes to use for block-level
+            compression of this file.
+        progress_callback: Optional callback receiving processed raw byte deltas.
+
+    Returns:
+        Tuple ``(stored_size, is_compressed, gain_pct, hypothetical_all_compressed_size)``.
+    """
+    raw_size: int = abs_path.stat().st_size
+    if raw_size == 0:
+        return 0, False, 0.0, 0
+
+    block_count: int = ceil_div(raw_size, logical_block_size)
+    header_size: int = _pfsc_header_size(block_count=block_count, logical_block_size=logical_block_size)
+    chosen_payload_size: int = 0
+    all_compressed_size: int = 0
+    compressed_blocks: int = 0
+    effective_block_workers: int = max(1, min(block_worker_count, block_count))
+
+    if effective_block_workers == 1:
+        with abs_path.open("rb") as source_file:
+            for _idx in range(block_count):
+                chunk: bytes = source_file.read(logical_block_size)
+                padded_chunk: bytes = chunk.ljust(logical_block_size, b"\x00")
+                compressed_chunk: bytes = zlib.compress(padded_chunk, level=zlib_level)
+                all_compressed_size += len(compressed_chunk)
+                gain_pct: float = ((len(padded_chunk) - len(compressed_chunk)) / len(padded_chunk)) * 100.0
+                if gain_pct >= threshold_gain:
+                    chosen_payload_size += len(compressed_chunk)
+                    compressed_blocks += 1
+                else:
+                    chosen_payload_size += len(padded_chunk)
+                if progress_callback is not None:
+                    progress_callback(len(chunk))
+    else:
+        worker_args_iter: Iterator[tuple[Path, int, int, int]] = _iter_pfsc_block_worker_args(
+            abs_path=abs_path,
+            block_count=block_count,
+            logical_block_size=logical_block_size,
+            zlib_level=zlib_level,
+        )
+        with mp.Pool(processes=effective_block_workers) as pool:
+            results_iter = pool.imap(_compress_pfsc_block_lengths_worker, worker_args_iter, chunksize=1)
+            raw_block_len: int
+            compressed_block_len: int
+            for raw_block_len, compressed_block_len in results_iter:
+                all_compressed_size += compressed_block_len
+                padded_block_len: int = logical_block_size
+                gain_pct: float = ((padded_block_len - compressed_block_len) / padded_block_len) * 100.0
+                if gain_pct >= threshold_gain:
+                    chosen_payload_size += compressed_block_len
+                    compressed_blocks += 1
+                else:
+                    chosen_payload_size += padded_block_len
+                if progress_callback is not None:
+                    progress_callback(raw_block_len)
+
+    encoded_payload_size: int = header_size + chosen_payload_size
+    hypothetical_all_compressed_size: int = header_size + all_compressed_size
+    if compressed_blocks == 0 or encoded_payload_size >= raw_size:
+        return raw_size, False, 0.0, hypothetical_all_compressed_size
+    effective_gain_pct: float = ((raw_size - encoded_payload_size) / raw_size) * 100.0
+    return encoded_payload_size, True, effective_gain_pct, hypothetical_all_compressed_size
+
+
+def _encode_pfsc_file_to_spool(
+    *,
+    abs_path: Path,
+    spool_path: Path,
+    threshold_gain: int,
+    zlib_level: int,
+    logical_block_size: int,
+    block_worker_count: int = 1,
+    progress_callback: Callable[[int], None] | None = None,
+) -> tuple[int, bool, float, int]:
+    """Write a file's PFSC payload to a spool file using low-memory streaming.
+
+    Args:
+        abs_path: Source file path.
+        spool_path: Output spool file path for compressed PFSC payload.
+        threshold_gain: Minimum per-block gain percent to keep compressed bytes.
+        zlib_level: zlib compression level.
+        logical_block_size: PFSC logical block size.
+        block_worker_count: Number of worker processes to use for block-level
+            compression of this file.
+        progress_callback: Optional callback receiving processed raw byte deltas.
+
+    Returns:
+        Tuple ``(stored_size, is_compressed, gain_pct, hypothetical_all_compressed_size)``.
+    """
+    raw_size: int = abs_path.stat().st_size
+    if raw_size == 0:
+        return 0, False, 0.0, 0
+
+    block_count: int = ceil_div(raw_size, logical_block_size)
+    header_size: int = _pfsc_header_size(block_count=block_count, logical_block_size=logical_block_size)
+    offsets: list[int] = [header_size]
+    all_compressed_size: int = 0
+    compressed_blocks: int = 0
+    effective_block_workers: int = max(1, min(block_worker_count, block_count))
+
+    with spool_path.open("w+b") as spool_file:
+        spool_file.seek(header_size)
+        if effective_block_workers == 1:
+            with abs_path.open("rb") as source_file:
+                for _idx in range(block_count):
+                    chunk: bytes = source_file.read(logical_block_size)
+                    padded_chunk: bytes = chunk.ljust(logical_block_size, b"\x00")
+                    compressed_chunk: bytes = zlib.compress(padded_chunk, level=zlib_level)
+                    all_compressed_size += len(compressed_chunk)
+                    gain_pct: float = ((len(padded_chunk) - len(compressed_chunk)) / len(padded_chunk)) * 100.0
+                    selected_chunk: bytes = compressed_chunk if gain_pct >= threshold_gain else padded_chunk
+                    if selected_chunk is compressed_chunk:
+                        compressed_blocks += 1
+                    spool_file.write(selected_chunk)
+                    offsets.append(offsets[-1] + len(selected_chunk))
+                    if progress_callback is not None:
+                        progress_callback(len(chunk))
+        else:
+            worker_args_iter: Iterator[tuple[Path, int, int, int]] = _iter_pfsc_block_worker_args(
+                abs_path=abs_path,
+                block_count=block_count,
+                logical_block_size=logical_block_size,
+                zlib_level=zlib_level,
+            )
+            with mp.Pool(processes=effective_block_workers) as pool:
+                results_iter = pool.imap(_compress_pfsc_block_payload_worker, worker_args_iter, chunksize=1)
+                raw_chunk: bytes
+                compressed_chunk: bytes
+                for raw_chunk, compressed_chunk in results_iter:
+                    padded_chunk: bytes = raw_chunk.ljust(logical_block_size, b"\x00")
+                    all_compressed_size += len(compressed_chunk)
+                    gain_pct: float = ((len(padded_chunk) - len(compressed_chunk)) / len(padded_chunk)) * 100.0
+                    selected_chunk: bytes = compressed_chunk if gain_pct >= threshold_gain else padded_chunk
+                    if selected_chunk is compressed_chunk:
+                        compressed_blocks += 1
+                    spool_file.write(selected_chunk)
+                    offsets.append(offsets[-1] + len(selected_chunk))
+                    if progress_callback is not None:
+                        progress_callback(len(raw_chunk))
+
+        encoded_payload_size: int = offsets[-1]
+        hypothetical_all_compressed_size: int = header_size + all_compressed_size
+        if compressed_blocks == 0 or encoded_payload_size >= raw_size:
+            return raw_size, False, 0.0, hypothetical_all_compressed_size
+
+        header: PFSCHeader = PFSCHeader(
+            magic=consts.PFSC_MAGIC,
+            unk4=consts.PFSC_UNK4,
+            unk8=consts.PFSC_UNK8,
+            logical_block_size=logical_block_size,
+            block_offsets_offset=consts.PFSC_BLOCK_OFFSETS_OFFSET,
+            data_offset=header_size,
+            data_length=block_count * logical_block_size,
+        )
+        header_area: bytearray = bytearray(header_size)
+        struct.pack_into(
+            "<iiiiqqQq",
+            header_area,
+            0,
+            header.magic,
+            header.unk4,
+            header.unk8,
+            header.logical_block_size,
+            header.logical_block_size,
+            header.block_offsets_offset,
+            header.data_offset,
+            header.data_length,
+        )
+        struct.pack_into(f"<{block_count + 1}Q", header_area, consts.PFSC_BLOCK_OFFSETS_OFFSET, *offsets)
+        spool_file.seek(0)
+        spool_file.write(header_area)
+        spool_file.truncate(encoded_payload_size)
+
+    effective_gain_pct: float = ((raw_size - encoded_payload_size) / raw_size) * 100.0
+    return encoded_payload_size, True, effective_gain_pct, hypothetical_all_compressed_size
+
+
+def _copy_exact_bytes(*, source_file: BinaryIO, destination_file: BinaryIO, byte_count: int, chunk_size: int) -> None:
+    """Copy exactly ``byte_count`` bytes between file objects.
+
+    Args:
+        source_file: Input binary stream.
+        destination_file: Output binary stream.
+        byte_count: Number of bytes to copy.
+        chunk_size: Maximum chunk size for each read/write.
+
+    Raises:
+        BuildError: If source ends before ``byte_count`` bytes are read.
+    """
+    remaining_bytes: int = byte_count
+    while remaining_bytes > 0:
+        current_chunk_size: int = min(chunk_size, remaining_bytes)
+        chunk: bytes = source_file.read(current_chunk_size)
+        if len(chunk) == 0:
+            raise BuildError("Stored payload source ended before expected size")
+        destination_file.write(chunk)
+        remaining_bytes -= len(chunk)
+
+
+def write_source_to_blocks(
+    out: BinaryIO,
+    source_path: Path,
+    payload_size: int,
+    blocks: list[int],
+    block_size: int,
+) -> None:
+    """Write a payload source file into non-contiguous destination blocks.
+
+    Args:
+        out: Open output image handle.
+        source_path: Path to payload bytes source file.
+        payload_size: Number of bytes to copy from source.
+        blocks: Destination block numbers.
+        block_size: Filesystem block size.
+    """
+    if payload_size <= 0:
+        return
+    chunk_size: int = min(block_size, 1024 * 1024)
+    with source_path.open("rb") as source_file:
+        remaining_bytes: int = payload_size
+        for block in blocks:
+            if remaining_bytes <= 0:
+                break
+            out.seek(block * block_size)
+            block_bytes_to_copy: int = min(block_size, remaining_bytes)
+            _copy_exact_bytes(
+                source_file=source_file,
+                destination_file=out,
+                byte_count=block_bytes_to_copy,
+                chunk_size=chunk_size,
+            )
+            remaining_bytes -= block_bytes_to_copy
+
+
+def write_source_to_offset(out: BinaryIO, source_path: Path, payload_size: int, offset: int) -> None:
+    """Write payload bytes from a source file into one contiguous output region.
+
+    Args:
+        out: Open output image handle.
+        source_path: Path to payload bytes source file.
+        payload_size: Number of bytes to copy from source.
+        offset: Absolute output byte offset where payload begins.
+    """
+    if payload_size <= 0:
+        return
+    out.seek(offset)
+    chunk_size: int = 1024 * 1024
+    with source_path.open("rb") as source_file:
+        _copy_exact_bytes(
+            source_file=source_file,
+            destination_file=out,
+            byte_count=payload_size,
+            chunk_size=chunk_size,
+        )
+
+
 def _drain_compression_progress_queue(progress_queue: SupportsIntQueue) -> int:
     """Drain queued compression progress deltas.
 
@@ -897,6 +1271,166 @@ def _drain_compression_progress_queue(progress_queue: SupportsIntQueue) -> int:
         except queue.Empty:
             break
     return drained_bytes
+
+
+def resolve_compression_worker_count(*, requested_cpu_count: int) -> int:
+    """Resolve the effective compression worker count for the current workload.
+
+    Args:
+        requested_cpu_count: Requested worker count from CLI, where ``0`` means
+            auto-select with ``max(1, cpu_count())``.
+
+    Returns:
+        Effective worker count, always at least ``1``.
+
+    Raises:
+        ValueError: If ``requested_cpu_count`` is negative.
+    """
+    if requested_cpu_count < 0:
+        raise ValueError(f"requested_cpu_count must be non-negative, got {requested_cpu_count}")
+
+    resolved_count: int
+    if requested_cpu_count == 0:
+        resolved_count = max(1, mp.cpu_count())
+    else:
+        resolved_count = requested_cpu_count
+
+    return max(1, resolved_count)
+
+
+def _compress_files_in_process(
+    *,
+    file_nodes_sorted: list[FileNode],
+    threshold_gain: int,
+    zlib_level: int,
+    compression_cpu_count: int,
+    dry_run: bool,
+    total_bytes_to_process: int,
+    progress: Progress,
+) -> None:
+    """Compress files in-process while streaming progress updates.
+
+    Args:
+        file_nodes_sorted: Ordered file nodes to process.
+        threshold_gain: Minimum per-block gain threshold.
+        zlib_level: zlib compression level.
+        compression_cpu_count: CPU budget available to block-level compression for
+            a single file.
+        dry_run: When True, only analyze compression decisions without writing spool files.
+        total_bytes_to_process: Total raw bytes represented by ``file_nodes_sorted``.
+        progress: Progress reporter to update.
+    """
+    progress_total_units: int = total_bytes_to_process if total_bytes_to_process > 0 else len(file_nodes_sorted)
+    displayed_progress_units: int = 0
+    processed_raw_bytes: int = 0
+
+    progress.step("compress", 0, progress_total_units, bytes_processed=0)
+
+    for completed_files, file_node in enumerate(file_nodes_sorted, start=1):
+        file_progress_bytes: int = 0
+        file_base_processed_bytes: int = processed_raw_bytes
+
+        def report_progress(
+            delta_bytes: int,
+            *,
+            _file_base_processed_bytes: int = file_base_processed_bytes,
+            _completed_files: int = completed_files,
+        ) -> None:
+            """Update progress as this file's logical blocks are processed."""
+            nonlocal displayed_progress_units, file_progress_bytes
+            file_progress_bytes += delta_bytes
+            target_units: int = (
+                min(total_bytes_to_process, _file_base_processed_bytes + file_progress_bytes)
+                if total_bytes_to_process > 0
+                else _completed_files
+            )
+            if target_units <= displayed_progress_units:
+                return
+            displayed_progress_units = target_units
+            progress.step(
+                "compress",
+                displayed_progress_units,
+                progress_total_units,
+                bytes_processed=displayed_progress_units if total_bytes_to_process > 0 else 0,
+            )
+
+        if file_node.raw_size == 0:
+            file_node.stored_source_path = file_node.abs_path
+            file_node.stored_source_is_temp = False
+            file_node.stored_size = 0
+            file_node.compressed = False
+            file_node.gain_pct = 0.0
+            file_node.hypothetical_compressed_size = 0
+        else:
+            block_worker_count: int = resolve_block_compression_worker_count(
+                requested_cpu_count=compression_cpu_count,
+                file_size=file_node.raw_size,
+            )
+            if dry_run:
+                stored_size: int
+                is_compressed: bool
+                gain_pct: float
+                hypothetical_compressed_size: int
+                stored_size, is_compressed, gain_pct, hypothetical_compressed_size = _analyze_pfsc_file_storage(
+                    abs_path=file_node.abs_path,
+                    threshold_gain=threshold_gain,
+                    zlib_level=zlib_level,
+                    logical_block_size=consts.PFSC_LOGICAL_BLOCK_SIZE,
+                    block_worker_count=block_worker_count,
+                    progress_callback=report_progress,
+                )
+                file_node.stored_source_path = file_node.abs_path
+                file_node.stored_source_is_temp = False
+                file_node.stored_size = stored_size
+                file_node.compressed = is_compressed
+                file_node.gain_pct = gain_pct
+                file_node.hypothetical_compressed_size = hypothetical_compressed_size
+            else:
+                spool_path: Path = _make_compression_spool_path(source_path=file_node.abs_path)
+                stored_size = 0
+                is_compressed = False
+                gain_pct = 0.0
+                hypothetical_compressed_size = 0
+                stored_size, is_compressed, gain_pct, hypothetical_compressed_size = _encode_pfsc_file_to_spool(
+                    abs_path=file_node.abs_path,
+                    spool_path=spool_path,
+                    threshold_gain=threshold_gain,
+                    zlib_level=zlib_level,
+                    logical_block_size=consts.PFSC_LOGICAL_BLOCK_SIZE,
+                    block_worker_count=block_worker_count,
+                    progress_callback=report_progress,
+                )
+                if is_compressed:
+                    file_node.stored_source_path = spool_path
+                    file_node.stored_source_is_temp = True
+                else:
+                    with suppress(FileNotFoundError):
+                        spool_path.unlink()
+                    file_node.stored_source_path = file_node.abs_path
+                    file_node.stored_source_is_temp = False
+                file_node.stored_size = stored_size
+                file_node.compressed = is_compressed
+                file_node.gain_pct = gain_pct
+                file_node.hypothetical_compressed_size = hypothetical_compressed_size
+
+        processed_raw_bytes += file_node.raw_size
+        target_units = processed_raw_bytes if total_bytes_to_process > 0 else completed_files
+        if target_units > displayed_progress_units:
+            displayed_progress_units = target_units
+            progress.step(
+                "compress",
+                displayed_progress_units,
+                progress_total_units,
+                bytes_processed=displayed_progress_units if total_bytes_to_process > 0 else 0,
+            )
+
+    if displayed_progress_units < progress_total_units:
+        progress.step(
+            "compress",
+            progress_total_units,
+            progress_total_units,
+            bytes_processed=total_bytes_to_process if total_bytes_to_process > 0 else 0,
+        )
 
 
 def decode_pfsc_payload(payload: bytes, expected_logical_size: int | None = None) -> bytes:
@@ -1162,9 +1696,8 @@ def compute_file_storage(
 ) -> None:
     """Decide how a file will be stored in the image.
 
-    This function updates the provided FileNode in-place with either:
-    - raw payload bytes for uncompressed storage, or
-    - PFSC payload bytes for compressed storage.
+    This function updates the provided FileNode in-place with source-path based
+    metadata and does not retain payload bytes in memory.
 
     Args:
         file_node: FileNode describing the file to process.
@@ -1181,39 +1714,38 @@ def compute_file_storage(
     if not (0 <= threshold_gain <= 100):
         raise ValueError(f"threshold_gain must be between 0 and 100 inclusive, got {threshold_gain}")
 
-    raw: bytes = file_node.abs_path.read_bytes()
-    if not compress or len(raw) == 0:
-        file_node.stored_payload = raw
-        file_node.stored_size = len(raw)
+    raw_size: int = file_node.abs_path.stat().st_size
+    if not compress or raw_size == 0:
+        file_node.stored_source_path = file_node.abs_path
+        file_node.stored_source_is_temp = False
+        file_node.stored_size = raw_size
         file_node.compressed = False
         file_node.gain_pct = 0.0
         file_node.hypothetical_compressed_size = 0
         return
 
-    encoded_payload: bytes
+    stored_size: int
+    is_compressed: bool
     gain_pct: float
     hypothetical_size: int
-    encoded_payload, gain_pct, hypothetical_size = encode_pfsc_payload(
-        raw=raw,
+    stored_size, is_compressed, gain_pct, hypothetical_size = _analyze_pfsc_file_storage(
+        abs_path=file_node.abs_path,
         threshold_gain=threshold_gain,
         zlib_level=zlib_level,
-        logical_block_size=consts.PFSC_LOGICAL_BLOCK_SIZE,
+        logical_block_size=block_size,
+        block_worker_count=1,
     )
-    if encoded_payload == raw:
-        file_node.stored_payload = raw
-        file_node.stored_size = len(raw)
-        file_node.compressed = False
-    else:
-        file_node.stored_payload = encoded_payload
-        file_node.stored_size = len(encoded_payload)
-        file_node.compressed = True
+    file_node.stored_source_path = file_node.abs_path
+    file_node.stored_source_is_temp = False
+    file_node.stored_size = stored_size
+    file_node.compressed = is_compressed
     file_node.gain_pct = gain_pct
     file_node.hypothetical_compressed_size = hypothetical_size
 
 
 def _compute_file_storage_worker(
-    args: tuple[Path, int, bool, int, int, SupportsIntQueue | None],
-) -> tuple[Path, bytes, int, bool, float, int]:
+    args: tuple[Path, int, bool, int, int, bool, SupportsIntQueue | None],
+) -> tuple[Path, Path, bool, int, bool, float, int]:
     """Worker function for parallel compression.
 
     This function is executed in a worker process and performs the same storage
@@ -1222,23 +1754,24 @@ def _compute_file_storage_worker(
 
     Args:
         args: Tuple containing ``(abs_path, threshold_gain, compress, block_size,
-            zlib_level, progress_queue)``.
+            zlib_level, dry_run, progress_queue)``.
 
     Returns:
-        A tuple ``(file_path, stored_payload, stored_size, compressed, gain_pct,
-        hypothetical_compressed_size)``.
+        A tuple ``(file_path, stored_source_path, stored_source_is_temp, stored_size,
+        compressed, gain_pct, hypothetical_compressed_size)``.
     """
     abs_path: Path
     threshold_gain: int
     compress: bool
     _block_size: int
     zlib_level: int
+    dry_run: bool
     progress_queue: SupportsIntQueue | None
-    (abs_path, threshold_gain, compress, _block_size, zlib_level, progress_queue) = args
+    (abs_path, threshold_gain, compress, _block_size, zlib_level, dry_run, progress_queue) = args
 
-    raw: bytes = abs_path.read_bytes()
-    if not compress or len(raw) == 0:
-        return abs_path, raw, len(raw), False, 0.0, 0
+    raw_size: int = abs_path.stat().st_size
+    if not compress or raw_size == 0:
+        return abs_path, abs_path, False, raw_size, False, 0.0, 0
 
     batched_progress_bytes: int = 0
 
@@ -1250,29 +1783,46 @@ def _compute_file_storage_worker(
             progress_queue.put(batched_progress_bytes)
             batched_progress_bytes = 0
 
-    encoded_payload: bytes
+    stored_size: int
+    is_compressed: bool
     gain_pct: float
     hypothetical_compressed_size: int
-    encoded_payload, gain_pct, hypothetical_compressed_size = encode_pfsc_payload(
-        raw=raw,
-        threshold_gain=threshold_gain,
-        zlib_level=zlib_level,
-        logical_block_size=consts.PFSC_LOGICAL_BLOCK_SIZE,
-        progress_callback=report_progress if progress_queue is not None else None,
-    )
+    if dry_run:
+        stored_size, is_compressed, gain_pct, hypothetical_compressed_size = _analyze_pfsc_file_storage(
+            abs_path=abs_path,
+            threshold_gain=threshold_gain,
+            zlib_level=zlib_level,
+            logical_block_size=consts.PFSC_LOGICAL_BLOCK_SIZE,
+            block_worker_count=1,
+            progress_callback=report_progress if progress_queue is not None else None,
+        )
+        stored_source_path: Path = abs_path
+        stored_source_is_temp: bool = False
+    else:
+        spool_path: Path = _make_compression_spool_path(source_path=abs_path)
+        stored_size, is_compressed, gain_pct, hypothetical_compressed_size = _encode_pfsc_file_to_spool(
+            abs_path=abs_path,
+            spool_path=spool_path,
+            threshold_gain=threshold_gain,
+            zlib_level=zlib_level,
+            logical_block_size=consts.PFSC_LOGICAL_BLOCK_SIZE,
+            block_worker_count=1,
+            progress_callback=report_progress if progress_queue is not None else None,
+        )
+        if is_compressed:
+            stored_source_path = spool_path
+            stored_source_is_temp = True
+        else:
+            with suppress(FileNotFoundError):
+                spool_path.unlink()
+            stored_source_path = abs_path
+            stored_source_is_temp = False
     if progress_queue is not None and batched_progress_bytes > 0:
         progress_queue.put(batched_progress_bytes)
-    if encoded_payload == raw:
-        stored_payload = raw
-        stored_size = len(raw)
-        is_compressed: bool = False
-    else:
-        stored_payload = encoded_payload
-        stored_size = len(encoded_payload)
-        is_compressed = True
     return (
         abs_path,
-        stored_payload,
+        stored_source_path,
+        stored_source_is_temp,
         stored_size,
         is_compressed,
         gain_pct,
@@ -1597,72 +2147,120 @@ def build_pfs(
 
     dir_nodes_sorted: list[DirNode] = sorted(dirs.values(), key=lambda d: d.rel_dir.lower())
     file_nodes_sorted: list[FileNode] = sorted(files.values(), key=lambda f: f.rel_path.lower())
+    temporary_payload_paths: list[Path] = []
 
     if compress and len(file_nodes_sorted) > 0:
         # Calculate total bytes for compression progress
         total_bytes_to_process: int = sum(f.raw_size for f in file_nodes_sorted)
-        worker_count: int = mp.cpu_count() if cpu_count == 0 else cpu_count
+        compression_cpu_count: int = resolve_compression_worker_count(requested_cpu_count=cpu_count)
+        worker_count: int = compression_cpu_count
         file_nodes_by_path: dict[Path, FileNode] = {f.abs_path: f for f in file_nodes_sorted}
         progress.status(
             f"\nCompressing {len(file_nodes_sorted)} files ({human_readable_size(total_bytes_to_process)}) "
             f"using {worker_count} CPU core{'s' if worker_count != 1 else ''}..."
         )
-        # Use multiprocessing for parallel compression
-        total_bytes_processed: int = 0
-        displayed_bytes_processed: int = 0
-        with mp.Manager() as manager:
-            progress_queue: SupportsIntQueue = manager.Queue()
-            worker_args: list[tuple[Path, int, bool, int, int, SupportsIntQueue | None]] = [
-                (f.abs_path, threshold_gain, True, consts.PFSC_LOGICAL_BLOCK_SIZE, zlib_level, progress_queue)
-                for f in file_nodes_sorted
-            ]
-            with mp.Pool(processes=worker_count) as pool:
-                results = pool.imap_unordered(_compute_file_storage_worker, worker_args, chunksize=1)
-                remaining_results: int = len(worker_args)
-                while remaining_results > 0:
-                    queued_bytes: int = _drain_compression_progress_queue(progress_queue=progress_queue)
-                    if queued_bytes > 0:
-                        displayed_bytes_processed = min(
-                            total_bytes_to_process,
-                            displayed_bytes_processed + queued_bytes,
-                        )
-                        progress.step(
-                            "compress",
-                            displayed_bytes_processed,
-                            total_bytes_to_process,
-                            bytes_processed=displayed_bytes_processed,
-                        )
-                    try:
-                        result = results.next(timeout=0.1)
-                    except mp.TimeoutError:
-                        continue
+        if worker_count == 1 or len(file_nodes_sorted) == 1:
+            # Single-worker or single-file path uses in-process flow so a large file
+            # can leverage block-level multiprocessing inside one file.
+            _compress_files_in_process(
+                file_nodes_sorted=file_nodes_sorted,
+                threshold_gain=threshold_gain,
+                zlib_level=zlib_level,
+                compression_cpu_count=compression_cpu_count,
+                dry_run=dry_run,
+                total_bytes_to_process=total_bytes_to_process,
+                progress=progress,
+            )
+        else:
+            # Use multiprocessing for parallel compression.
+            progress_total_units: int = (
+                total_bytes_to_process if total_bytes_to_process > 0 else len(file_nodes_sorted)
+            )
+            progress.step("compress", 0, progress_total_units, bytes_processed=0)
+            total_bytes_processed: int = 0
+            displayed_progress_units: int = 0
+            with mp.Manager() as manager:
+                progress_queue: SupportsIntQueue = manager.Queue()
+                worker_args: list[tuple[Path, int, bool, int, int, bool, SupportsIntQueue | None]] = [
+                    (
+                        f.abs_path,
+                        threshold_gain,
+                        True,
+                        consts.PFSC_LOGICAL_BLOCK_SIZE,
+                        zlib_level,
+                        dry_run,
+                        progress_queue,
+                    )
+                    for f in file_nodes_sorted
+                ]
+                with mp.Pool(processes=worker_count) as pool:
+                    results = pool.imap_unordered(_compute_file_storage_worker, worker_args, chunksize=1)
+                    remaining_results: int = len(worker_args)
+                    while remaining_results > 0:
+                        queued_bytes: int = _drain_compression_progress_queue(progress_queue=progress_queue)
+                        if queued_bytes > 0:
+                            displayed_progress_units = min(
+                                total_bytes_to_process,
+                                displayed_progress_units + queued_bytes,
+                            )
+                            progress.step(
+                                "compress",
+                                displayed_progress_units,
+                                progress_total_units,
+                                bytes_processed=displayed_progress_units if total_bytes_to_process > 0 else 0,
+                            )
+                        try:
+                            result = results.next(timeout=0.1)
+                        except mp.TimeoutError:
+                            continue
 
-                    remaining_results -= 1
-                    abs_path, payload, stored_size, is_compressed, gain_pct, hyp_comp_size = result
-                    file_node = file_nodes_by_path[abs_path]
-                    file_node.stored_payload = payload
-                    file_node.stored_size = stored_size
-                    file_node.compressed = is_compressed
-                    file_node.gain_pct = gain_pct
-                    file_node.hypothetical_compressed_size = hyp_comp_size
-                    total_bytes_processed += file_node.raw_size
-                    if displayed_bytes_processed < total_bytes_processed:
-                        displayed_bytes_processed = total_bytes_processed
-                        progress.step(
-                            "compress",
-                            displayed_bytes_processed,
-                            total_bytes_to_process,
-                            bytes_processed=displayed_bytes_processed,
+                        remaining_results -= 1
+                        (
+                            abs_path,
+                            stored_source_path,
+                            stored_source_is_temp,
+                            stored_size,
+                            is_compressed,
+                            gain_pct,
+                            hyp_comp_size,
+                        ) = result
+                        file_node = file_nodes_by_path[abs_path]
+                        file_node.stored_source_path = stored_source_path
+                        file_node.stored_source_is_temp = stored_source_is_temp
+                        file_node.stored_size = stored_size
+                        file_node.compressed = is_compressed
+                        file_node.gain_pct = gain_pct
+                        file_node.hypothetical_compressed_size = hyp_comp_size
+                        total_bytes_processed += file_node.raw_size
+                        completed_files: int = len(worker_args) - remaining_results
+                        target_progress_units: int = (
+                            total_bytes_processed if total_bytes_to_process > 0 else completed_files
                         )
-        if displayed_bytes_processed < total_bytes_to_process:
-            progress.step(
-                "compress",
-                total_bytes_to_process,
-                total_bytes_to_process,
-                bytes_processed=total_bytes_to_process,
+                        if displayed_progress_units < target_progress_units:
+                            displayed_progress_units = target_progress_units
+                            progress.step(
+                                "compress",
+                                displayed_progress_units,
+                                progress_total_units,
+                                bytes_processed=displayed_progress_units if total_bytes_to_process > 0 else 0,
+                            )
+            if displayed_progress_units < progress_total_units:
+                progress.step(
+                    "compress",
+                    progress_total_units,
+                    progress_total_units,
+                    bytes_processed=total_bytes_to_process if total_bytes_to_process > 0 else 0,
+                )
+        if not dry_run:
+            temporary_payload_paths.extend(
+                [
+                    file_node.stored_source_path
+                    for file_node in file_nodes_sorted
+                    if file_node.stored_source_is_temp and file_node.stored_source_path is not None
+                ]
             )
     else:
-        # No compression: just read files without any compression logic
+        # No compression: use source files directly and avoid buffering payloads.
         if len(file_nodes_sorted) > 0:
             total_bytes_to_process = sum(f.raw_size for f in file_nodes_sorted)
             progress.status(
@@ -1670,9 +2268,9 @@ def build_pfs(
             )
             total_bytes_processed = 0
             for idx, f in enumerate(file_nodes_sorted, start=1):
-                raw = f.abs_path.read_bytes()
-                f.stored_payload = raw
-                f.stored_size = len(raw)
+                f.stored_source_path = f.abs_path
+                f.stored_source_is_temp = False
+                f.stored_size = f.raw_size
                 f.compressed = False
                 f.gain_pct = 0.0
                 f.hypothetical_compressed_size = 0
@@ -1843,16 +2441,18 @@ def build_pfs(
     inodes_per_block = block_size // inode_size
     inode_block_count = ceil_div(inode_count, inodes_per_block)
 
-    all_nodes_data: list[tuple[Inode, bytes, bool]] = []
+    all_nodes_data: list[tuple[Inode, int, bool, bytes | None, Path | None]] = []
 
     # Root directory first, then nested dirs, then files.
     root_blob = b"".join(d.to_bytes() for d in dirs[""].dirents)
-    all_nodes_data.append((dirs[""].inode, root_blob, True))
+    all_nodes_data.append((dirs[""].inode, len(root_blob), True, root_blob, None))
     for d in non_root_dirs:
         blob = b"".join(ent.to_bytes() for ent in d.dirents)
-        all_nodes_data.append((d.inode, blob, True))
+        all_nodes_data.append((d.inode, len(blob), True, blob, None))
     for f in file_nodes_sorted:
-        all_nodes_data.append((f.inode, f.stored_payload, False))
+        if f.stored_source_path is None:
+            raise BuildError(f"Internal error: missing stored payload source for {f.rel_path}")
+        all_nodes_data.append((f.inode, f.stored_size, False, None, f.stored_source_path))
 
     signature_targets: list[SignatureTarget] = []
     indirect_block_records: dict[int, list[int]] = {}
@@ -1912,17 +2512,17 @@ def build_pfs(
         ndblock += 2
         reserved_empty_blocks.update({ndblock - 2, ndblock - 1})
 
-        for inode, payload, is_dir in all_nodes_data:
-            blocks = max(1, ceil_div(len(payload), block_size)) if len(payload) > 0 else 1
+        for inode, payload_size, is_dir, _payload_bytes, _payload_source in all_nodes_data:
+            blocks = max(1, ceil_div(payload_size, block_size)) if payload_size > 0 else 1
             inode.blocks = blocks
             if is_dir:
                 inode.size = blocks * block_size
                 inode.size_compressed = inode.size
             else:
                 if inode.flags & consts.INODE_FLAG_COMPRESSED:
-                    inode.size = len(payload)
+                    inode.size = payload_size
                 else:
-                    inode.size = len(payload)
+                    inode.size = payload_size
                     inode.size_compressed = inode.size
             ndblock = assign_signed_inode_layout(
                 inode,
@@ -1959,8 +2559,8 @@ def build_pfs(
             ndblock += 1
             reserved_empty_blocks.add(ndblock - 1)
 
-        for inode, payload, is_dir in all_nodes_data:
-            blocks = max(1, ceil_div(len(payload), block_size)) if len(payload) > 0 else 1
+        for inode, payload_size, is_dir, _payload_bytes, _payload_source in all_nodes_data:
+            blocks = max(1, ceil_div(payload_size, block_size)) if payload_size > 0 else 1
             inode.db[0] = ndblock
             inode.blocks = blocks
             for i in range(1, consts.MAX_DIRECT_BLOCKS):
@@ -1970,9 +2570,9 @@ def build_pfs(
                 inode.size_compressed = inode.size
             else:
                 if inode.flags & consts.INODE_FLAG_COMPRESSED:
-                    inode.size = len(payload)
+                    inode.size = payload_size
                 else:
-                    inode.size = len(payload)
+                    inode.size = payload_size
                     inode.size_compressed = inode.size
             ndblock += blocks
 
@@ -2090,20 +2690,43 @@ def build_pfs(
                     out.write(collision_blob)
 
             # Calculate total bytes for progress tracking
-            total_write_bytes = sum(len(payload) for _, payload, _ in all_nodes_data)
-            written_bytes = 0
-            for idx, (inode, payload, _is_dir) in enumerate(all_nodes_data, start=1):
-                if signed:
-                    write_payload_to_blocks(
-                        out,
-                        payload,
-                        collect_signed_block_numbers(inode, block_size, indirect_block_records, signed_inode_bits),
-                        block_size,
-                    )
+            total_write_bytes: int = sum(
+                payload_size for _inode, payload_size, _is_dir, _bytes, _path in all_nodes_data
+            )
+            written_bytes: int = 0
+            for inode, payload_size, _is_dir, payload_bytes, payload_source_path in all_nodes_data:
+                if payload_bytes is not None:
+                    if signed:
+                        write_payload_to_blocks(
+                            out,
+                            payload_bytes,
+                            collect_signed_block_numbers(inode, block_size, indirect_block_records, signed_inode_bits),
+                            block_size,
+                        )
+                    else:
+                        out.seek(inode.db[0] * block_size)
+                        out.write(payload_bytes)
                 else:
-                    out.seek(inode.db[0] * block_size)
-                    out.write(payload)
-                written_bytes += len(payload)
+                    if payload_source_path is None:
+                        raise BuildError(f"Internal error: payload source is missing for inode {inode.number}")
+                    if signed:
+                        write_source_to_blocks(
+                            out=out,
+                            source_path=payload_source_path,
+                            payload_size=payload_size,
+                            blocks=collect_signed_block_numbers(
+                                inode, block_size, indirect_block_records, signed_inode_bits
+                            ),
+                            block_size=block_size,
+                        )
+                    else:
+                        write_source_to_offset(
+                            out=out,
+                            source_path=payload_source_path,
+                            payload_size=payload_size,
+                            offset=inode.db[0] * block_size,
+                        )
+                written_bytes += payload_size
                 progress.step("write", written_bytes, total_write_bytes, bytes_processed=written_bytes)
 
             if signed:
@@ -2142,6 +2765,9 @@ def build_pfs(
 
         # Rename temp file to final output path
         shutil.move(str(tmp_path), str(output_path))
+        for temporary_payload_path in temporary_payload_paths:
+            with suppress(FileNotFoundError):
+                temporary_payload_path.unlink()
         progress.status(f"Successfully wrote {human_readable_size(image_size)} image")
 
     except Exception:
@@ -2154,6 +2780,9 @@ def build_pfs(
         if tmp_path.exists():
             with suppress(FileNotFoundError):
                 tmp_path.unlink()
+        for temporary_payload_path in temporary_payload_paths:
+            with suppress(FileNotFoundError):
+                temporary_payload_path.unlink()
         raise
 
     stats.elapsed_seconds = time.time() - start

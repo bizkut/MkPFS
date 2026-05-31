@@ -19,8 +19,8 @@ MkPFS is designed to be a clean and practical entry point for PlayStation PFS im
 - Create and manage PFS disk images for PlayStation-oriented workflows
 - Verify structure, payload hashes, layout consistency, and source-tree matches
 - Inspect image contents quickly with a tree view instead of digging through raw structures
-- Work with common image extensions such as `.ffpfs`, `.pfs`, `.dat`, and `.bin`
-- Use the generated images with tools like [ShadowMountPlus](https://github.com/drakmor/ShadowMountPlus)
+- Work with common image extensions such as `.ffpfs`, `.ffpfsc`.
+- Use the generated images with tools like [MicroMount](https://github.com/drakmor/ShadowMountPlus) and [ShadowMountPlus](https://github.com/drakmor/ShadowMountPlus)
 - Build the inner PFS filesystem used inside PKG or FPKG workflows
 - Use the same core workflow from both the CLI and the Python library
 - Explore a bundled, source-backed knowledge base for PFS and PKG research
@@ -31,11 +31,12 @@ MkPFS is designed to be a clean and practical entry point for PlayStation PFS im
 # Install using pip
 pip install mkpfs
 
-# Convert an .exfat or .ffpkg file into a PFSC compressed image .ffpfsc 
+# Convert an .exfat or .ffpkg file into a PFSC compressed image .ffpfsc
+# NOTE: .ffpfsc is the simplest way to have game-file compression support.
 mkpfs pack file --compress --verify ./GAME1234.exfat ./GAME1234.ffpfsc
 
 # Convert a homebrew folder into a PFS image with compression and verification
-# NOTE: .ffpfs file are directly supported by ShadowMountPlus
+# WARNING: .ffpfs file only has limited support in ShadowMountPlus
 mkpfs pack folder --compress --verify ./GAME1234-app ./GAME1234.ffpfs
 
 # Inspect the generated image
@@ -44,6 +45,32 @@ mkpfs inspect ./GAME1234.ffpfs
 # Unpack the image back into a folder
 mkpfs unpack ./GAME1234.ffpfs ./GAME1234-extracted/
 ```
+
+## 💖 Sponsorship
+
+MkPFS is easier to sustain when users who benefit from it help fund it.
+
+<p>
+  <a href="https://github.com/sponsors/RenanGBarreto">
+    <img alt="GitHub Sponsors" src="https://img.shields.io/badge/Fund%20Development-GitHub%20Sponsors-e11d48?style=flat-square&logo=githubsponsors&logoColor=white" />
+  </a>
+</p>
+
+Support helps with:
+
+- Ongoing CLI improvements
+- The Python library and reusable internals
+- Better test coverage and compatibility work
+- More documentation, examples, and research notes
+
+Sponsor here:
+- https://github.com/sponsors/RenanGBarreto
+
+Or donate directly using:
+ - **BTC:**  **`141kKRoDpaS6PNC2yxSi8vziDFTmzCnArE`**
+ - **USDT (TRC-20):**  **`TQb7bUYSYRmdWgALHCejH33dNij9XyTAnU`**
+ - **USDT (ERC-20):**  **`0x63c0b4b21133c4068375ae7566dafcf1398cf6fb`**
+
 
 ## 📊 Compression Statistics
 
@@ -118,7 +145,7 @@ mkpfs [-h] {pack,verify,inspect,tree,unpack} ...
 mkpfs pack [-h] {folder,file} ...
 ```
 
-Use `pack folder` to build from a directory tree, or `pack file` to stage one file into a single-file image.
+Use `pack folder` to build from a directory tree, or `pack file` to treat one file as a virtual single-file tree.
 
 ### `pack folder`
 
@@ -155,7 +182,7 @@ mkpfs pack folder ./input ./game.ffpfs --require-game-files --verify
 | `--inode-bits {32,64}` | Inode width mode bit. Default: `32`. |
 | `--case-sensitive` | Build a case-sensitive image. |
 | `--case-insensitive` | Set the case-insensitive mode bit. This is the default behavior. |
-| `--cpu-count CPU_COUNT` | Number of CPU cores to use for PFSC compression. `0` means all available cores. |
+| `--cpu-count CPU_COUNT` | Number of CPU cores to use for PFSC compression. `0` means auto `max(1, cpu_count())`, non-zero uses `max(1, user value)`. |
 | `--compression-level COMPRESSION_LEVEL` | Zlib compression level from `0` to `9`. Default: `7`. |
 | `--signed` | Build a signed PFS image using a zero EKPFS key and seed. |
 | `--encrypted` | Encrypt filesystem blocks with AES-XTS. |
@@ -205,7 +232,7 @@ mkpfs pack file ./payload.exfat ./payload.ffpfsc --verify
 | `--inode-bits {32,64}` | Inode width mode bit. Default: `32`. |
 | `--case-sensitive` | Build a case-sensitive image. |
 | `--case-insensitive` | Set the case-insensitive mode bit. This is the default behavior. |
-| `--cpu-count CPU_COUNT` | Number of CPU cores to use for PFSC compression. `0` means all available cores. |
+| `--cpu-count CPU_COUNT` | Number of CPU cores to use for PFSC compression. `0` means auto `max(1, cpu_count())`, non-zero uses `max(1, user value)`. |
 | `--compression-level COMPRESSION_LEVEL` | Zlib compression level from `0` to `9`. Default: `7`. |
 | `--signed` | Build a signed PFS image using a zero EKPFS key and seed. |
 | `--encrypted` | Encrypt filesystem blocks with AES-XTS. |
@@ -216,7 +243,7 @@ mkpfs pack file ./payload.exfat ./payload.ffpfsc --verify
 
 Notes:
 
-- Single-file packing stages the file into a temporary one-file tree before building.
+- Single-file packing stages the file in a temporary one-file tree using links, so the source payload is not duplicated on disk.
 - The default adjusted extension for single-file output is `.ffpfsc`.
 
 ### `verify`
@@ -322,6 +349,98 @@ mkpfs verify ./output.ffpfs
 mkpfs tree ./output.ffpfs
 ```
 
+## 💻 Example Output
+
+```bash
+$ mkpfs pack folder --verify --compress "./BREW00000-app" "./BREW00000.ffpfs"
+======================================================================
+PFS Image Builder - Parameters
+======================================================================
+  Source path:       ./BREW00000-app
+  Output path:       ./BREW00000.ffpfs
+  Version:           1 (PS4)
+  Header magic:      PFS (20130315)
+  Compression Setup: PFSC (0x43534650)
+  Block size:        65,536 bytes (64 KiB)
+  Inode width:       32-bit
+  PFS mode:          0x0008  (Bit 0=signed, Bit 1=64-bit inodes, Bit 2=encrypted, Bit 3=case insensitive)
+    Signed:          no
+    64-bit inodes:   no
+    Encrypted:       no
+    New crypt:       no
+    Case insensitive: yes
+  Compression:       enabled
+  Game-file checks:   disabled
+  Threshold gain:    20%
+  CPU cores:         auto (max(1, cpu_count()))
+  Zlib level:        7
+  Dry run:           no
+======================================================================
+
+Discovering files...
+[################################] 100% scan
+
+Compressing 180 files (5.87 GB) using 10 CPU cores...
+[################################] 100% compress @ 68.75 MB/s            
+
+Writing PFS image to ./BREW00000.ffpfs...
+[################################] 100% write @ 728.27 MB/s
+
+Successfully wrote 3.21 GB image
+======================================================================
+Build Summary
+======================================================================
+  Input path:              ./BREW00000-app
+  Output path:             ./BREW00000.ffpfs
+  Total files:             180
+  Total uncompressed size: 5.87 GB
+  Total stored size:       3.21 GB
+
+  Compression Statistics:
+    Compressed files:       53
+    Uncompressed files:     127
+    Actual gain achieved:   45.40%
+    Max theoretical gain:   46.51%  (3.14 GB if all files compressed)
+
+  Block Alignment Waste:
+    Block size:             64 KiB (65,536 bytes)
+    Wasted space:           6.75 MB (0.21% of file data blocks)
+
+  Elapsed time:            92.46s
+  Throughput:              65.05 MB/s
+
+
+Running post-create check...
+======================================================================
+PFS Check Report
+======================================================================
+Image:                 ./BREW00000.ffpfs
+Version:               1 (PS4)
+Header magic:          PFS (20130315)
+Compression Setup:     PFSC (0x43534650)
+Read-only:             yes
+Mode:                  0x0008  (Bit 0=signed, Bit 1=64-bit inodes, Bit 2=encrypted, Bit 3=case insensitive)
+  Signed:              no
+  64-bit inodes:       no
+  Encrypted:           no
+  Case insensitive:    yes
+Block size:            65,536 bytes
+Inodes:                196
+Directories:           14
+Files:                 180
+Compressed files:      53
+Files hash-checked:    180
+Data CRC32:            0x7A6E1B38
+Manifest SHA256:       5eee3aed04394d0abf978037ccfc6ddcf9c3945fa11816fe14f11d5853e5553e
+Logical file bytes:    3,443,395,982
+Stored file bytes:     6,306,784,749
+flat_path_table keys:  193
+Warnings:              0
+Errors:                0
+======================================================================
+
+```
+
 ## 🛠️ Development
 
 Set up the local environment:
@@ -338,27 +457,6 @@ Run the validation commands:
 uv run --frozen ruff format .
 uv run --frozen ruff check .
 ```
-
-## 💖 Sponsorship
-
-MkPFS is easier to sustain when users who benefit from it help fund it.
-
-<p>
-  <a href="https://github.com/sponsors/RenanGBarreto">
-    <img alt="GitHub Sponsors" src="https://img.shields.io/badge/Fund%20Development-GitHub%20Sponsors-e11d48?style=flat-square&logo=githubsponsors&logoColor=white" />
-  </a>
-</p>
-
-Support helps with:
-
-- Ongoing CLI improvements
-- The Python library and reusable internals
-- Better test coverage and compatibility work
-- More documentation, examples, and research notes
-
-Sponsor here:
-
-- https://github.com/sponsors/RenanGBarreto
 
 ## 💙 Special thanks and Contributors
 

@@ -468,22 +468,173 @@ class TestEncryptedImageRoundTrip(PfsTestCase):
         file_path.write_bytes(raw)
         progress_queue: FakeProgressQueue = FakeProgressQueue()
 
-        result: tuple[Path, bytes, int, bool, float, int] = pfs_mod._compute_file_storage_worker(
+        result: tuple[Path, Path, bool, int, bool, float, int] = pfs_mod._compute_file_storage_worker(
             (
                 file_path,
                 1,
                 True,
                 c.PFSC_LOGICAL_BLOCK_SIZE,
                 9,
+                False,
                 progress_queue,
             )
         )
 
         assert result[0] == file_path
+        assert isinstance(result[1], Path)
+        assert isinstance(result[2], bool)
         assert sum(progress_queue.items) == len(raw)
         assert len(progress_queue.items) >= 2
         assert progress_queue.items[0] == pfs_mod.PFSC_PROGRESS_REPORT_BYTES
         assert progress_queue.items[-1] <= pfs_mod.PFSC_PROGRESS_REPORT_BYTES
+
+    def test_resolve_compression_worker_count_auto_uses_cpu_count(self) -> None:
+        """Auto worker resolution should use ``max(1, cpu_count())``."""
+        with patch.object(pfs_mod.mp, "cpu_count", return_value=8):
+            assert pfs_mod.resolve_compression_worker_count(requested_cpu_count=0) == 8
+
+        with patch.object(pfs_mod.mp, "cpu_count", return_value=1):
+            assert pfs_mod.resolve_compression_worker_count(requested_cpu_count=0) == 1
+
+    def test_resolve_compression_worker_count_keeps_explicit_request(self) -> None:
+        """Explicit worker requests should be normalized with ``max(1, user)``."""
+        assert pfs_mod.resolve_compression_worker_count(requested_cpu_count=10) == 10
+        assert pfs_mod.resolve_compression_worker_count(requested_cpu_count=2) == 2
+
+    def test_resolve_block_compression_worker_count_is_thresholded(self) -> None:
+        """Block-level workers should only activate for files above the size threshold."""
+        threshold_size: int = pfs_mod.PFSC_SINGLE_FILE_PARALLEL_MIN_SIZE
+        assert (
+            pfs_mod.resolve_block_compression_worker_count(
+                requested_cpu_count=8,
+                file_size=threshold_size - 1,
+            )
+            == 1
+        )
+        assert (
+            pfs_mod.resolve_block_compression_worker_count(
+                requested_cpu_count=8,
+                file_size=threshold_size,
+            )
+            == 8
+        )
+
+    def test_single_file_dry_run_uses_block_workers_above_threshold(self) -> None:
+        """Single-file dry run should request multiple block workers above threshold."""
+        tmp_path: Path = self.make_temp_path()
+        src: Path = tmp_path / "src"
+        src.mkdir(parents=True)
+        file_path: Path = src / "large.bin"
+        file_path.write_bytes(b"A" * (c.PFSC_LOGICAL_BLOCK_SIZE * 3))
+        out: Path = tmp_path / "out.ffpfs"
+        observed_block_workers: list[int] = []
+
+        def fake_analyze_pfsc_file_storage(
+            *,
+            abs_path: Path,
+            threshold_gain: int,
+            zlib_level: int,
+            logical_block_size: int,
+            block_worker_count: int = 1,
+            progress_callback: Callable[[int], None] | None = None,
+        ) -> tuple[int, bool, float, int]:
+            """Capture requested block worker count and return uncompressed metadata."""
+            observed_block_workers.append(block_worker_count)
+            raw_size: int = abs_path.stat().st_size
+            if progress_callback is not None:
+                progress_callback(raw_size)
+            _ = threshold_gain
+            _ = zlib_level
+            _ = logical_block_size
+            return raw_size, False, 0.0, 0
+
+        with (
+            patch.object(pfs_mod, "PFSC_SINGLE_FILE_PARALLEL_MIN_SIZE", 1),
+            patch.object(pfs_mod, "_analyze_pfsc_file_storage", side_effect=fake_analyze_pfsc_file_storage),
+        ):
+            build_pfs(
+                source_root=src,
+                output_path=out,
+                block_size=65536,
+                pfs_version=c.PFS_VERSION_PS4,
+                inode_bits=32,
+                case_insensitive=True,
+                signed=False,
+                compress=True,
+                threshold_gain=1,
+                zlib_level=7,
+                dry_run=True,
+                cpu_count=4,
+                verbose=False,
+                encrypted=False,
+            )
+
+        assert observed_block_workers
+        assert observed_block_workers[0] == 4
+
+    def test_parallel_pfsc_spool_matches_single_worker_output(self) -> None:
+        """Parallel PFSC spool encoding should match single-worker output bytes."""
+        tmp_path: Path = self.make_temp_path()
+        source_path: Path = tmp_path / "source.bin"
+        raw_payload: bytes = (b"A" * c.PFSC_LOGICAL_BLOCK_SIZE) + (b"ABCD" * 2048) + (b"\x00" * 12345)
+        source_path.write_bytes(raw_payload)
+        sequential_spool: Path = tmp_path / "sequential.pfsc"
+        parallel_spool: Path = tmp_path / "parallel.pfsc"
+
+        sequential_result: tuple[int, bool, float, int] = pfs_mod._encode_pfsc_file_to_spool(
+            abs_path=source_path,
+            spool_path=sequential_spool,
+            threshold_gain=1,
+            zlib_level=7,
+            logical_block_size=c.PFSC_LOGICAL_BLOCK_SIZE,
+            block_worker_count=1,
+        )
+        parallel_result: tuple[int, bool, float, int] = pfs_mod._encode_pfsc_file_to_spool(
+            abs_path=source_path,
+            spool_path=parallel_spool,
+            threshold_gain=1,
+            zlib_level=7,
+            logical_block_size=c.PFSC_LOGICAL_BLOCK_SIZE,
+            block_worker_count=2,
+        )
+
+        assert sequential_result == parallel_result
+        assert sequential_spool.read_bytes() == parallel_spool.read_bytes()
+
+    def test_compression_phase_emits_intermediate_progress_for_single_worker(self) -> None:
+        """Single-worker compression should emit intermediate progress updates."""
+        tmp_path: Path = self.make_temp_path()
+        src: Path = tmp_path / "src"
+        src.mkdir(parents=True)
+        raw_size: int = c.PFSC_LOGICAL_BLOCK_SIZE * 4 + 123
+        (src / "large.bin").write_bytes(b"A" * raw_size)
+        out: Path = tmp_path / "out.ffpfsc"
+
+        with patch.object(pfs_mod.Progress, "step", autospec=True) as step_mock:
+            build_pfs(
+                source_root=src,
+                output_path=out,
+                block_size=65536,
+                pfs_version=c.PFS_VERSION_PS4,
+                inode_bits=32,
+                case_insensitive=True,
+                signed=False,
+                compress=True,
+                threshold_gain=1,
+                cpu_count=1,
+                zlib_level=7,
+                dry_run=False,
+                verbose=False,
+                encrypted=False,
+            )
+
+        compress_calls: list[tuple[int, int]] = [
+            (int(call.args[2]), int(call.args[3])) for call in step_mock.call_args_list if call.args[1] == "compress"
+        ]
+        assert compress_calls
+        assert any(done == 0 for done, _total in compress_calls)
+        assert any(0 < done < total for done, total in compress_calls)
+        assert any(done == total for done, total in compress_calls)
 
     def test_pfsc_decode_rejects_invalid_magic(self) -> None:
         """PFSC decoding should fail when the payload magic is invalid."""

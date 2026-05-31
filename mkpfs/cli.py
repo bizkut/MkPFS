@@ -2,10 +2,11 @@
 
 import argparse
 import json
-import multiprocessing as mp
-import shutil
+import os
 import tempfile
-from contextlib import suppress
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 from . import consts
@@ -91,7 +92,8 @@ def print_build_parameters(
     info(f"  Game-file checks:   {'required' if require_game_files else 'disabled'}")
     if compress:
         info(f"  Threshold gain:    {threshold_gain}%")
-        info(f"  CPU cores:         {'all available' if cpu_count == 0 else cpu_count}")
+        cpu_label: str = "auto (max(1, cpu_count()))" if cpu_count == 0 else str(max(1, cpu_count))
+        info(f"  CPU cores:         {cpu_label}")
         info(f"  Zlib level:        {zlib_level}")
     info(f"  Dry run:           {'yes' if dry_run else 'no'}")
     info("" + "=" * 70)
@@ -197,7 +199,14 @@ def print_summary(stats: BuildStats) -> None:
 
 
 def prompt_overwrite(output_path: Path) -> bool:
-    """Prompt user if output file exists. Returns True if it should proceed."""
+    """Prompt for overwrite and remove existing output artifacts when accepted.
+
+    Args:
+        output_path: Target output image path.
+
+    Returns:
+        ``True`` when the build should proceed, otherwise ``False``.
+    """
     if not output_path.exists():
         return True
 
@@ -205,6 +214,8 @@ def prompt_overwrite(output_path: Path) -> bool:
     while True:
         response = input("Overwrite? [Y/n] ").strip().lower()
         if response in ("y", "yes", ""):
+            with suppress(OSError):
+                output_path.unlink()
             # Clean up any partial .tmp file if it exists
             tmp_path = Path(str(output_path) + ".tmp")
             if tmp_path.exists():
@@ -214,6 +225,35 @@ def prompt_overwrite(output_path: Path) -> bool:
         if response in ("n", "no"):
             return False
         info("Please enter 'y' or 'n'")
+
+
+def cleanup_pack_temp_artifacts(*, output_path: Path, stale_age_seconds: int = 300) -> None:
+    """Remove stale temporary artifacts from interrupted pack runs.
+
+    Args:
+        output_path: Final output image path for the current run.
+        stale_age_seconds: Minimum age in seconds for temp spool files to qualify
+            as stale cleanup candidates.
+    """
+    tmp_path: Path = Path(str(output_path) + ".tmp")
+    if tmp_path.exists():
+        with suppress(OSError):
+            tmp_path.unlink()
+
+    temp_root: Path = Path(tempfile.gettempdir())
+    stale_cutoff_epoch: float = time.time() - max(0, stale_age_seconds)
+    spool_path: Path
+    for spool_path in temp_root.glob("mkpfs-*.pfsc"):
+        if not spool_path.is_file():
+            continue
+        try:
+            spool_mtime_epoch: float = spool_path.stat().st_mtime
+        except OSError:
+            continue
+        if spool_mtime_epoch > stale_cutoff_epoch:
+            continue
+        with suppress(OSError):
+            spool_path.unlink()
 
 
 def run_image_check(
@@ -404,7 +444,7 @@ def cli_mkpfs_add_create_args(
         "--cpu-count",
         type=int,
         default=0,
-        help="Number of CPU cores to use for PFSC compression (0 = all available)",
+        help="Number of CPU cores for PFSC compression (0 = auto max(1, cpu_count()), non-zero = max(1, user value))",
     )
     parser.add_argument("--compression-level", type=int, default=7, help="Zlib compression level (0-9, default: 7)")
     parser.add_argument("--signed", action="store_true", help="Build a signed PFS image using zero EKPFS/seed")
@@ -473,9 +513,8 @@ def _run_pack_build(
     if block_size < 0x1000 or block_size > 0x200000:
         raise BuildError("--block-size must be between 4096 and 2097152")
 
-    available_cpu_count: int = mp.cpu_count()
-    if args.cpu_count < 0 or args.cpu_count > available_cpu_count:
-        raise BuildError(f"--cpu-count must be within 0..{available_cpu_count}")
+    if args.cpu_count < 0:
+        raise BuildError("--cpu-count must be non-negative")
 
     if args.compression_level < 0 or args.compression_level > 9:
         raise BuildError("--compression-level must be within 0..9")
@@ -513,6 +552,8 @@ def _run_pack_build(
         require_game_files,
     )
 
+    if not args.dry_run:
+        cleanup_pack_temp_artifacts(output_path=output_path)
     if not args.dry_run and not prompt_overwrite(output_path):
         info("Operation cancelled.")
         return 0
@@ -555,6 +596,39 @@ def _run_pack_build(
     for e in errors:
         error(e)
     return 1 if errors else 0
+
+
+@contextmanager
+def _stage_single_file_source_root(*, source_file: Path) -> Iterator[Path]:
+    """Yield a temporary source root exposing one file without copying data.
+
+    The staged file is created as a hard link when possible, with a symlink
+    fallback when hard linking is unavailable in the current environment.
+
+    Args:
+        source_file: Existing source file that should appear at the temporary
+            root path.
+
+    Yields:
+        Temporary directory path containing exactly one file entry with the
+        same file name as ``source_file``.
+
+    Raises:
+        BuildError: If no link strategy can stage the file.
+    """
+    with tempfile.TemporaryDirectory() as staging_dir_name:
+        staging_root: Path = Path(staging_dir_name)
+        staging_file: Path = staging_root / source_file.name
+        try:
+            os.link(src=source_file, dst=staging_file)
+        except OSError:
+            try:
+                staging_file.symlink_to(target=source_file)
+            except OSError as exc:
+                raise BuildError(
+                    "Unable to stage source file without copying, hard link and symlink both failed"
+                ) from exc
+        yield staging_root
 
 
 def cli_mkpfs_create_run(args: argparse.Namespace) -> int:
@@ -603,10 +677,7 @@ def cli_mkpfs_pack_file_run(args: argparse.Namespace) -> int:
     if not source_file.exists() or not source_file.is_file():
         raise BuildError(f"--source-file must be an existing file: {source_file}")
 
-    with tempfile.TemporaryDirectory() as staging_dir_name:
-        staging_root: Path = Path(staging_dir_name)
-        staging_file: Path = staging_root / source_file.name
-        shutil.copy2(source_file, staging_file)
+    with _stage_single_file_source_root(source_file=source_file) as staging_root:
         return _run_pack_build(
             args=args,
             build_source_root=staging_root,
@@ -637,10 +708,7 @@ def cli_mkpfs_check_run(args: argparse.Namespace) -> int:
         if not source_file.exists() or not source_file.is_file():
             info(f"--source-file must be an existing file: {source_file}")
             return 2
-        with tempfile.TemporaryDirectory() as staging_dir_name:
-            staging_root: Path = Path(staging_dir_name)
-            staging_file: Path = staging_root / source_file.name
-            shutil.copy2(source_file, staging_file)
+        with _stage_single_file_source_root(source_file=source_file) as staging_root:
             source = staging_root
             return _run_verify_check(
                 image=image,
