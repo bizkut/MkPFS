@@ -10,7 +10,7 @@
 
 MkPFS is a command-line tool and Python library for building, verifying, inspecting, browsing, and extracting PlayStation FileSystem (PFS) disk images. It works with common image naming conventions such as `.ffpfs`, `.ffpfsc`, `.pfs`, `.dat`, and `.bin`, and fits both direct image workflows and PKG or FPKG inner-PFS generation.
 
-[Quick Start](#quick-start) · [Compression Statistics](#compression-statistics) · [Installation](#installation) · [Command reference](#command-reference) · [Development](#development) · [Related projects](#related-projects) · [Sponsor](https://github.com/sponsors/RenanGBarreto)
+[Quick Start](#-quick-start) · [Compression Statistics](#-compression-statistics) · [Installation](#-installation) · [Command reference](#command-reference) · [Development](#-development) · [Related projects](#related-projects) · [Sponsor](https://github.com/sponsors/RenanGBarreto)
 
 ## 🎯 Why MkPFS
 
