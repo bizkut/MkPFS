@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -174,6 +175,24 @@ class TestCliArgumentHelpers(CliTestCase):
         )
         self.assertEqual(compression_action.default, 7)
 
+    def test_pack_parser_cpu_count_help_mentions_auto_and_user_normalization(self) -> None:
+        """The pack parser should document auto and explicit worker normalization rules."""
+        parser: argparse.ArgumentParser = cli.cli_mkpfs_main_parsers()
+        pack_parser: argparse.ArgumentParser = next(
+            action.choices["pack"] for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+        )
+        pack_choices: dict[str, argparse.ArgumentParser] = next(
+            action.choices for action in pack_parser._actions if isinstance(action, argparse._SubParsersAction)
+        )
+        folder_parser: argparse.ArgumentParser = pack_choices["folder"]
+        cpu_action: argparse.Action = next(
+            action for action in folder_parser._actions if getattr(action, "dest", "") == "cpu_count"
+        )
+        self.assertEqual(cpu_action.default, 0)
+        self.assertIsNotNone(cpu_action.help)
+        self.assertIn("cpu_count()", cpu_action.help or "")
+        self.assertIn("max(1, user value)", cpu_action.help or "")
+
     def test_pack_parser_folder_variant_exposes_optional_game_file_requirement_flag(self) -> None:
         """The pack folder parser should expose the optional strict game-file flag."""
         parser: argparse.ArgumentParser = cli.cli_mkpfs_main_parsers()
@@ -272,7 +291,7 @@ class TestCliPromptOverwrite(CliTestCase):
             self.assertFalse(cli.prompt_overwrite(output_path=output_path))
 
     def test_prompt_overwrite_removes_partial_temp_file_before_yes(self) -> None:
-        """The overwrite prompt should remove a partial temp file before proceeding."""
+        """The overwrite prompt should remove old output and partial temp files."""
         tmp_path: Path = self.make_temp_path()
         output_path: Path = tmp_path / "out.ffpfs"
         partial_path: Path = Path(f"{output_path}.tmp")
@@ -280,6 +299,7 @@ class TestCliPromptOverwrite(CliTestCase):
         partial_path.write_text("partial", encoding="utf-8")
         with patch("builtins.input", return_value="y"):
             self.assertTrue(cli.prompt_overwrite(output_path=output_path))
+        self.assertFalse(output_path.exists())
         self.assertFalse(partial_path.exists())
 
     def test_prompt_overwrite_retries_invalid_input_and_ignores_unlink_errors(self) -> None:
@@ -294,6 +314,32 @@ class TestCliPromptOverwrite(CliTestCase):
             patch.object(Path, "unlink", side_effect=OSError("unlink blocked")),
         ):
             self.assertTrue(cli.prompt_overwrite(output_path=output_path))
+
+    def test_cleanup_pack_temp_artifacts_removes_output_tmp_and_stale_spool_files(self) -> None:
+        """Temp cleanup should remove stale output tmp files and stale pfsc spool files."""
+        tmp_path: Path = self.make_temp_path()
+        output_path: Path = tmp_path / "out.ffpfs"
+        output_tmp_path: Path = Path(f"{output_path}.tmp")
+        output_tmp_path.write_text("partial", encoding="utf-8")
+
+        temp_root: Path = tmp_path / "temp-root"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        stale_spool_path: Path = temp_root / "mkpfs-stale.pfsc"
+        fresh_spool_path: Path = temp_root / "mkpfs-fresh.pfsc"
+        stale_spool_path.write_bytes(b"x")
+        fresh_spool_path.write_bytes(b"y")
+        os.utime(stale_spool_path, times=(100.0, 100.0))
+        os.utime(fresh_spool_path, times=(990.0, 990.0))
+
+        with (
+            patch.object(cli.tempfile, "gettempdir", return_value=str(temp_root)),
+            patch.object(cli.time, "time", return_value=1000.0),
+        ):
+            cli.cleanup_pack_temp_artifacts(output_path=output_path, stale_age_seconds=300)
+
+        self.assertFalse(output_tmp_path.exists())
+        self.assertFalse(stale_spool_path.exists())
+        self.assertTrue(fresh_spool_path.exists())
 
 
 class TestCliOutputFormatting(CliTestCase):
@@ -494,7 +540,7 @@ class TestCliCreateRun(CliTestCase):
                 cli.cli_mkpfs_create_run(bad_block)
 
             bad_cpu_dict: dict[str, object] = base_args.copy()
-            bad_cpu_dict["cpu_count"] = 10**9
+            bad_cpu_dict["cpu_count"] = -1
             bad_cpu: SimpleNamespace = SimpleNamespace(**bad_cpu_dict)
             with self.assertRaises(BuildError):
                 cli.cli_mkpfs_create_run(bad_cpu)
@@ -530,10 +576,12 @@ class TestCliCreateRun(CliTestCase):
         )
         with (
             patch.object(cli, "validate_input", return_value=("TITLE", [])),
+            patch.object(cli, "cleanup_pack_temp_artifacts") as mocked_cleanup,
             patch.object(cli, "prompt_overwrite", return_value=False),
             patch.object(cli, "build_pfs", side_effect=AssertionError("build should not run")),
         ):
             self.assertEqual(cli.cli_mkpfs_create_run(args), 0)
+        mocked_cleanup.assert_called_once()
 
     def test_create_run_runs_post_verify_and_returns_error_when_check_fails(self) -> None:
         """Create run should perform post-verify and return a failure code when verification reports errors."""
@@ -595,8 +643,8 @@ class TestCliCreateRun(CliTestCase):
         self.assertTrue(mocked_build.call_args.kwargs["encrypted"])
         self.assertEqual(mocked_build.call_args.kwargs["ekpfs"], bytes.fromhex("12" * 32))
 
-    def test_pack_file_run_stages_a_single_root_file_and_disables_game_file_checks(self) -> None:
-        """Pack file should stage one file at the root and force relaxed validation."""
+    def test_pack_file_run_stages_a_single_root_file_without_copy_and_disables_game_file_checks(self) -> None:
+        """Pack file should stage one root file without byte-copying and force relaxed validation."""
         tmp_path: Path = self.make_temp_path()
         source_file: Path = tmp_path / "sample.bin"
         source_file.write_bytes(b"payload")
@@ -622,7 +670,9 @@ class TestCliCreateRun(CliTestCase):
             self.assertIsInstance(output_value, Path)
             staged_root: Path = staged_root_value
             adjusted_output: Path = output_value
-            self.assertTrue((staged_root / source_file.name).exists())
+            staged_file: Path = staged_root / source_file.name
+            self.assertTrue(staged_file.exists())
+            self.assertTrue(staged_file.samefile(source_file))
             self.assertEqual(adjusted_output.suffix, ".ffpfsc")
             return BuildStats(input_path=staged_root, output_path=adjusted_output)
 
@@ -660,7 +710,7 @@ class TestCliReadOnlyCommands(CliTestCase):
             self.assertEqual(cli.cli_mkpfs_check_run(args), 0)
 
     def test_check_run_supports_source_file_by_staging_single_file_tree(self) -> None:
-        """Verify should stage a single source file as root content for source comparison."""
+        """Verify should stage a single source file as root content without copying bytes."""
         tmp_path: Path = self.make_temp_path()
         source_file: Path = tmp_path / "only.bin"
         source_file.write_bytes(b"payload")
@@ -679,7 +729,9 @@ class TestCliReadOnlyCommands(CliTestCase):
             del image, print_tree, expected_crc32, expected_manifest_sha256, emit_report, ekpfs, new_crypt
             seen_source.append(source)
             assert source is not None
-            self.assertTrue((source / source_file.name).is_file())
+            staged_file: Path = source / source_file.name
+            self.assertTrue(staged_file.is_file())
+            self.assertTrue(staged_file.samefile(source_file))
             return [], [], {}, -1
 
         args: SimpleNamespace = SimpleNamespace(

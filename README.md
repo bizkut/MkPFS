@@ -118,7 +118,7 @@ mkpfs [-h] {pack,verify,inspect,tree,unpack} ...
 mkpfs pack [-h] {folder,file} ...
 ```
 
-Use `pack folder` to build from a directory tree, or `pack file` to stage one file into a single-file image.
+Use `pack folder` to build from a directory tree, or `pack file` to treat one file as a virtual single-file tree.
 
 ### `pack folder`
 
@@ -155,7 +155,7 @@ mkpfs pack folder ./input ./game.ffpfs --require-game-files --verify
 | `--inode-bits {32,64}` | Inode width mode bit. Default: `32`. |
 | `--case-sensitive` | Build a case-sensitive image. |
 | `--case-insensitive` | Set the case-insensitive mode bit. This is the default behavior. |
-| `--cpu-count CPU_COUNT` | Number of CPU cores to use for PFSC compression. `0` means all available cores. |
+| `--cpu-count CPU_COUNT` | Number of CPU cores to use for PFSC compression. `0` means auto `max(1, cpu_count())`, non-zero uses `max(1, user value)`. |
 | `--compression-level COMPRESSION_LEVEL` | Zlib compression level from `0` to `9`. Default: `7`. |
 | `--signed` | Build a signed PFS image using a zero EKPFS key and seed. |
 | `--encrypted` | Encrypt filesystem blocks with AES-XTS. |
@@ -205,7 +205,7 @@ mkpfs pack file ./payload.exfat ./payload.ffpfsc --verify
 | `--inode-bits {32,64}` | Inode width mode bit. Default: `32`. |
 | `--case-sensitive` | Build a case-sensitive image. |
 | `--case-insensitive` | Set the case-insensitive mode bit. This is the default behavior. |
-| `--cpu-count CPU_COUNT` | Number of CPU cores to use for PFSC compression. `0` means all available cores. |
+| `--cpu-count CPU_COUNT` | Number of CPU cores to use for PFSC compression. `0` means auto `max(1, cpu_count())`, non-zero uses `max(1, user value)`. |
 | `--compression-level COMPRESSION_LEVEL` | Zlib compression level from `0` to `9`. Default: `7`. |
 | `--signed` | Build a signed PFS image using a zero EKPFS key and seed. |
 | `--encrypted` | Encrypt filesystem blocks with AES-XTS. |
@@ -216,7 +216,7 @@ mkpfs pack file ./payload.exfat ./payload.ffpfsc --verify
 
 Notes:
 
-- Single-file packing stages the file into a temporary one-file tree before building.
+- Single-file packing stages the file in a temporary one-file tree using links, so the source payload is not duplicated on disk.
 - The default adjusted extension for single-file output is `.ffpfsc`.
 
 ### `verify`
