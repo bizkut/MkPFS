@@ -6,11 +6,12 @@ permissions:
 on:
   push:
     branches:
-      - main
+      - '**'
+    tags:
+      - '**'
   pull_request:
     branches:
-      - main
-
+      - '**'
 jobs:
   build:
     name: 📦 Builds the package
