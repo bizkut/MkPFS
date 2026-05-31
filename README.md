@@ -19,7 +19,7 @@ MkPFS is designed to be a clean and practical entry point for PlayStation PFS im
 - Create and manage PFS disk images for PlayStation-oriented workflows
 - Verify structure, payload hashes, layout consistency, and source-tree matches
 - Inspect image contents quickly with a tree view instead of digging through raw structures
-- Work with common image extensions such as `.ffpfs`, `.pfs`, `.dat`, and `.bin`
+- Work with common image extensions such as `.ffpfs`, `.ffpfsc`, `.pfs`, `.dat`, and `.bin`
 - Use the generated images with tools like [ShadowMountPlus](https://github.com/drakmor/ShadowMountPlus)
 - Build the inner PFS filesystem used inside PKG or FPKG workflows
 - Use the same core workflow from both the CLI and the Python library
@@ -320,6 +320,98 @@ mkpfs verify ./output.ffpfs
 
 # 3. Inspect the final tree layout
 mkpfs tree ./output.ffpfs
+```
+
+## 💻 Example Output
+
+```bash
+$ mkpfs pack folder --verify --compress "./BREW00000-app" "./BREW00000.ffpsf"
+======================================================================
+PFS Image Builder - Parameters
+======================================================================
+  Source path:       ./BREW00000-app
+  Output path:       ./BREW00000.ffpsf
+  Version:           1 (PS4)
+  Header magic:      PFS (20130315)
+  Compression Setup: PFSC (0x43534650)
+  Block size:        65,536 bytes (64 KiB)
+  Inode width:       32-bit
+  PFS mode:          0x0008  (Bit 0=signed, Bit 1=64-bit inodes, Bit 2=encrypted, Bit 3=case insensitive)
+    Signed:          no
+    64-bit inodes:   no
+    Encrypted:       no
+    New crypt:       no
+    Case insensitive: yes
+  Compression:       enabled
+  Game-file checks:   disabled
+  Threshold gain:    20%
+  CPU cores:         auto (max(1, cpu_count()))
+  Zlib level:        7
+  Dry run:           no
+======================================================================
+
+Discovering files...
+[################################] 100% scan
+
+Compressing 180 files (5.87 GB) using 10 CPU cores...
+[################################] 100% compress @ 68.75 MB/s            
+
+Writing PFS image to ./BREW00000.ffpsf...
+[################################] 100% write @ 728.27 MB/s
+
+Successfully wrote 3.21 GB image
+======================================================================
+Build Summary
+======================================================================
+  Input path:              ./BREW00000-app
+  Output path:             ./BREW00000.ffpsf
+  Total files:             180
+  Total uncompressed size: 5.87 GB
+  Total stored size:       3.21 GB
+
+  Compression Statistics:
+    Compressed files:       53
+    Uncompressed files:     127
+    Actual gain achieved:   45.40%
+    Max theoretical gain:   46.51%  (3.14 GB if all files compressed)
+
+  Block Alignment Waste:
+    Block size:             64 KiB (65,536 bytes)
+    Wasted space:           6.75 MB (0.21% of file data blocks)
+
+  Elapsed time:            92.46s
+  Throughput:              65.05 MB/s
+
+
+Running post-create check...
+======================================================================
+PFS Check Report
+======================================================================
+Image:                 ./BREW00000.ffpsf
+Version:               1 (PS4)
+Header magic:          PFS (20130315)
+Compression Setup:     PFSC (0x43534650)
+Read-only:             yes
+Mode:                  0x0008  (Bit 0=signed, Bit 1=64-bit inodes, Bit 2=encrypted, Bit 3=case insensitive)
+  Signed:              no
+  64-bit inodes:       no
+  Encrypted:           no
+  Case insensitive:    yes
+Block size:            65,536 bytes
+Inodes:                196
+Directories:           14
+Files:                 180
+Compressed files:      53
+Files hash-checked:    180
+Data CRC32:            0x7A6E1B38
+Manifest SHA256:       5eee3aed04394d0abf978037ccfc6ddcf9c3945fa11816fe14f11d5853e5553e
+Logical file bytes:    3,443,395,982
+Stored file bytes:     6,306,784,749
+flat_path_table keys:  193
+Warnings:              0
+Errors:                0
+======================================================================
+
 ```
 
 ## 🛠️ Development
