@@ -345,6 +345,44 @@ class TestCliArgumentHelpers(CliTestCase):
         self.assertIn("--adjust-output-file-extension", option_strings)
         self.assertIn("--no-adjust-output-file-extension", option_strings)
 
+    def test_pack_parser_accepts_folder_subcommand_with_output_positional(self) -> None:
+        """The canonical pack folder parser should keep source and output positional args."""
+        parser: argparse.ArgumentParser = cli.cli_mkpfs_main_parsers()
+        parsed_args: argparse.Namespace = parser.parse_args(["pack", "folder", "src", "out.ffpfs"])
+        self.assertEqual(parsed_args.command, "pack")
+        self.assertEqual(parsed_args.pack_command, "folder")
+        self.assertEqual(parsed_args.source_dir, "src")
+        self.assertEqual(parsed_args.image_file, "out.ffpfs")
+
+    def test_pack_parser_accepts_file_subcommand_with_output_positional(self) -> None:
+        """The canonical pack file parser should keep source and output positional args."""
+        parser: argparse.ArgumentParser = cli.cli_mkpfs_main_parsers()
+        parsed_args: argparse.Namespace = parser.parse_args(["pack", "file", "src.bin", "out.ffpfsc"])
+        self.assertEqual(parsed_args.command, "pack")
+        self.assertEqual(parsed_args.pack_command, "file")
+        self.assertEqual(parsed_args.source_file, "src.bin")
+        self.assertEqual(parsed_args.image_file, "out.ffpfsc")
+
+    def test_pack_argv_normalization_rewrites_legacy_flat_pack_commands(self) -> None:
+        """Legacy flat pack commands should be rewritten to include the missing pack mode."""
+        tmp_path: Path = self.make_temp_path()
+        source_dir: Path = tmp_path / "folder-source"
+        source_dir.mkdir()
+        source_file: Path = tmp_path / "payload.bin"
+        source_file.write_bytes(b"payload")
+
+        dir_argv: list[str] | None = cli.normalize_cli_argv_for_pack_compat(
+            ["pack", str(source_dir), "folder.ffpfs", "--dry-run"]
+        )
+        file_argv: list[str] | None = cli.normalize_cli_argv_for_pack_compat(
+            ["pack", str(source_file), "file.ffpfsc", "--dry-run"]
+        )
+
+        self.assertIsNotNone(dir_argv)
+        self.assertIsNotNone(file_argv)
+        self.assertEqual(dir_argv[0:3], ["pack", "folder", str(source_dir)])
+        self.assertEqual(file_argv[0:3], ["pack", "file", str(source_file)])
+
 
 class TestCliPromptOverwrite(CliTestCase):
     """Tests for the interactive overwrite prompt helper."""

@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import shutil
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -1131,9 +1132,39 @@ def cli_mkpfs_main_parsers() -> argparse.ArgumentParser:
     return parser
 
 
+def normalize_cli_argv_for_pack_compat(argv: list[str] | None = None) -> list[str] | None:
+    """Normalize legacy pack argv layouts into the canonical subcommand shape.
+
+    This keeps the current ``mkpfs pack folder|file ...`` interface and also
+    accepts the older ``mkpfs pack <source> <image> ...`` form by inferring the
+    missing pack mode from the source path.
+
+    Args:
+        argv: Optional CLI argument vector. When omitted, ``sys.argv[1:]`` is
+            inspected and a rewritten list is returned only when needed.
+
+    Returns:
+        Rewritten argument list for legacy flat pack invocations, otherwise the
+        original value.
+    """
+    effective_argv: list[str] = list(sys.argv[1:] if argv is None else argv)
+    if len(effective_argv) < 3 or effective_argv[0] != "pack":
+        return argv
+
+    explicit_pack_mode: str = effective_argv[1]
+    if explicit_pack_mode in {"folder", "file"} or explicit_pack_mode.startswith("-"):
+        return argv
+
+    source_path: Path = Path(explicit_pack_mode).expanduser()
+    inferred_pack_mode: str = "file" if source_path.is_file() else "folder"
+    normalized_argv: list[str] = ["pack", inferred_pack_mode, *effective_argv[1:]]
+    return normalized_argv
+
+
 def cli_mkpfs_main(argv: list[str] | None = None) -> int:
     parser: argparse.ArgumentParser = cli_mkpfs_main_parsers()
-    args = parser.parse_args(argv)
+    normalized_argv: list[str] | None = normalize_cli_argv_for_pack_compat(argv)
+    args = parser.parse_args(normalized_argv)
     return int(args.func(args))
 
 
