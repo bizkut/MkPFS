@@ -734,7 +734,7 @@ def store_file_node_raw(file_node: FileNode) -> None:
     file_node.stored_size = file_node.raw_size
     file_node.compressed = False
     file_node.gain_pct = 0.0
-    file_node.hypothetical_compressed_size = 0
+file_node.hypothetical_compressed_size = file_node.raw_size
 
 
 @dataclass
