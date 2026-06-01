@@ -32,11 +32,9 @@ MkPFS is designed to be a clean and practical entry point for PlayStation PFS im
 pip install mkpfs
 
 # Convert an .exfat or .ffpkg file into a PFSC compressed image .ffpfsc
-# NOTE: .ffpfsc is the simplest way to have game-file compression support.
 mkpfs pack file --compress --verify ./GAME1234.exfat ./GAME1234.ffpfsc
 
 # Convert a homebrew folder into a PFS image with compression and verification
-# WARNING: .ffpfs file only has limited support in ShadowMountPlus
 mkpfs pack folder --compress --verify ./GAME1234-app ./GAME1234.ffpfs
 
 # Inspect the generated image
