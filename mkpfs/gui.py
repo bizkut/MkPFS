@@ -72,8 +72,8 @@ class MkPFSApp:
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
         self.root.title("MkPFS - PlayStation File System Builder")
-        self.root.geometry("1100x780")
-        self.root.minsize(900, 650)
+        self.root.geometry("1200x900")
+        self.root.minsize(1000, 750)
 
     def _build_ui(self) -> None:
         self.root.columnconfigure(0, weight=1)
@@ -119,6 +119,7 @@ class MkPFSApp:
     def _build_pack_folder_tab(self, parent: ctk.CTkFrame) -> None:
         container: ctk.CTkScrollableFrame = ctk.CTkScrollableFrame(parent)
         container.pack(fill="both", expand=True, padx=8, pady=8)
+        container.columnconfigure(1, weight=1)
 
         self.pack_folder_source_var: tk.StringVar = tk.StringVar()
         self._build_file_picker(
@@ -244,6 +245,7 @@ class MkPFSApp:
     def _build_pack_file_tab(self, parent: ctk.CTkFrame) -> None:
         container: ctk.CTkScrollableFrame = ctk.CTkScrollableFrame(parent)
         container.pack(fill="both", expand=True, padx=8, pady=8)
+        container.columnconfigure(1, weight=1)
 
         self.pack_file_source_var: tk.StringVar = tk.StringVar()
         self._build_file_picker(container, "Source file", self.pack_file_source_var, "Browse", self._pick_file, 0)
@@ -276,6 +278,7 @@ class MkPFSApp:
     def _build_verify_tab(self, parent: ctk.CTkFrame) -> None:
         container: ctk.CTkScrollableFrame = ctk.CTkScrollableFrame(parent)
         container.pack(fill="both", expand=True, padx=8, pady=8)
+        container.columnconfigure(1, weight=1)
 
         self.verify_image_var: tk.StringVar = tk.StringVar()
         self._build_file_picker(container, "Image file", self.verify_image_var, "Browse", self._pick_file, 0)
@@ -297,6 +300,7 @@ class MkPFSApp:
     def _build_inspect_tab(self, parent: ctk.CTkFrame) -> None:
         container: ctk.CTkScrollableFrame = ctk.CTkScrollableFrame(parent)
         container.pack(fill="both", expand=True, padx=8, pady=8)
+        container.columnconfigure(1, weight=1)
 
         self.inspect_image_var: tk.StringVar = tk.StringVar()
         self._build_file_picker(container, "Image file", self.inspect_image_var, "Browse", self._pick_file, 0)
@@ -319,6 +323,7 @@ class MkPFSApp:
     def _build_unpack_tab(self, parent: ctk.CTkFrame) -> None:
         container: ctk.CTkScrollableFrame = ctk.CTkScrollableFrame(parent)
         container.pack(fill="both", expand=True, padx=8, pady=8)
+        container.columnconfigure(1, weight=1)
 
         self.unpack_image_var: tk.StringVar = tk.StringVar()
         self._build_file_picker(container, "Image file", self.unpack_image_var, "Browse", self._pick_file, 0)
@@ -343,6 +348,7 @@ class MkPFSApp:
     def _build_tree_tab(self, parent: ctk.CTkFrame) -> None:
         container: ctk.CTkScrollableFrame = ctk.CTkScrollableFrame(parent)
         container.pack(fill="both", expand=True, padx=8, pady=8)
+        container.columnconfigure(1, weight=1)
 
         self.tree_image_var: tk.StringVar = tk.StringVar()
         self._build_file_picker(container, "Image file", self.tree_image_var, "Browse", self._pick_file, 0)
@@ -366,7 +372,7 @@ class MkPFSApp:
         row: int,
     ) -> None:
         ctk.CTkLabel(parent, text=label + ":").grid(row=row, column=0, padx=8, pady=6, sticky="e")
-        entry: ctk.CTkEntry = ctk.CTkEntry(parent, textvariable=var, width=460)
+        entry: ctk.CTkEntry = ctk.CTkEntry(parent, textvariable=var, width=600)
         entry.grid(row=row, column=1, padx=4, pady=6, sticky="ew")
         ctk.CTkButton(parent, text=button_text, command=lambda: self._browse(var, dialog), width=80).grid(
             row=row, column=2, padx=4, pady=6
