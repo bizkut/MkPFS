@@ -128,7 +128,7 @@ jobs:
           chmod +x linuxdeploy
           ./linuxdeploy --appdir "$appdir" --output appimage
 
-          mv MkPFS-*-x86_64.AppImage "${{ matrix.artifact }}"
+          mv MkPFS-x86_64.AppImage "${{ matrix.artifact }}"
           echo "artifact_name=${{ matrix.artifact }}" >> "$GITHUB_ENV"
 
       - name: Upload artifact
