@@ -56,6 +56,7 @@ jobs:
             --onefile \
             --windowed \
             --icon assets/icon.ico \
+            --hidden-import tkinter \
             --collect-data customtkinter \
             --distpath dist-gui \
             scripts/gui-entry.py
@@ -92,6 +93,7 @@ jobs:
             --windowed \
             --osx-bundle-identifier com.psbrew.mkpfs \
             --icon assets/icon.icns \
+            --hidden-import tkinter \
             --collect-data customtkinter \
             --distpath dist-gui \
             scripts/gui-entry.py
@@ -118,6 +120,7 @@ jobs:
             --name MkPFS \
             --onefile \
             --windowed \
+            --hidden-import tkinter \
             --collect-data customtkinter \
             --distpath dist-gui \
             scripts/gui-entry.py
