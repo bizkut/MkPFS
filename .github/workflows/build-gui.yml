@@ -23,13 +23,13 @@ jobs:
         include:
           - os: windows-latest
             target: Windows-x64
-            ext: .exe
+            artifact: MkPFS-Windows-x64.exe
           - os: macos-latest
             target: macOS-Universal
-            ext: ""
+            artifact: MkPFS-macOS-Universal.zip
           - os: ubuntu-latest
             target: Linux-x64
-            ext: ""
+            artifact: MkPFS-Linux-x64.AppImage
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -44,36 +44,85 @@ jobs:
       - name: Install PyInstaller
         run: uv pip install pyinstaller
 
-      - name: Build single binary
+      # ------------------------------------------------------------------ #
+      # Windows: single-file executable
+      # ------------------------------------------------------------------ #
+      - name: Build (Windows)
+        if: matrix.os == 'windows-latest'
         shell: bash
         run: |
           uv run pyinstaller \
-            --name "MkPFS${{ matrix.ext }}" \
+            --name MkPFS \
             --onefile \
             --windowed \
             --collect-data customtkinter \
             --distpath dist-gui \
             scripts/gui-entry.py
-        env:
-          PYTHONUNBUFFERED: "1"
 
-      - name: Package artifact (Windows)
+      - name: Package (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          $dest = "MkPFS-${{ matrix.target }}${{ matrix.ext }}"
-          Move-Item -Path "dist-gui/MkPFS${{ matrix.ext }}" -Destination "$dest"
-          echo "artifact_name=$dest" >> $env:GITHUB_ENV
+          Move-Item -Path "dist-gui/MkPFS.exe" -Destination "${{ matrix.artifact }}"
+          echo "artifact_name=${{ matrix.artifact }}" >> $env:GITHUB_ENV
 
-      - name: Package artifact (macOS)
+      # ------------------------------------------------------------------ #
+      # macOS: .app bundle with optional code signing
+      # ------------------------------------------------------------------ #
+      - name: Build (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          dest="MkPFS-${{ matrix.target }}${{ matrix.ext }}"
-          mv "dist-gui/MkPFS${{ matrix.ext }}" "$dest"
-          chmod +x "$dest"
-          echo "artifact_name=$dest" >> "$GITHUB_ENV"
+          uv run pyinstaller \
+            --name MkPFS \
+            --windowed \
+            --osx-bundle-identifier com.psbrew.mkpfs \
+            --collect-data customtkinter \
+            --distpath dist-gui \
+            scripts/gui-entry.py
 
-      - name: Build AppImage (Linux)
+      - name: Sign (macOS)
+        if: matrix.os == 'macos-latest'
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$MACOS_CERTIFICATE_P12" ]; then
+            echo "No signing certificate secret found; skipping codesign"
+            exit 0
+          fi
+
+          echo "$MACOS_CERTIFICATE_P12" | base64 -d > certificate.p12
+          security create-keychain -p "$MACOS_CERTIFICATE_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$MACOS_CERTIFICATE_PASSWORD" build.keychain
+          security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$MACOS_CERTIFICATE_PASSWORD" build.keychain
+
+          IDENTITY=$(security find-identity -v -p codesigning build.keychain | grep -o '".*"' | head -1 | tr -d '"')
+          echo "Signing with identity: $IDENTITY"
+          codesign --deep --force --verify --verbose --sign "$IDENTITY" --options runtime "dist-gui/MkPFS.app"
+
+      - name: Package (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent "dist-gui/MkPFS.app" "${{ matrix.artifact }}"
+          echo "artifact_name=${{ matrix.artifact }}" >> "$GITHUB_ENV"
+
+      # ------------------------------------------------------------------ #
+      # Linux: single binary wrapped as AppImage
+      # ------------------------------------------------------------------ #
+      - name: Build (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          uv run pyinstaller \
+            --name MkPFS \
+            --onefile \
+            --windowed \
+            --collect-data customtkinter \
+            --distpath dist-gui \
+            scripts/gui-entry.py
+
+      - name: Package AppImage (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update -qq
@@ -95,13 +144,13 @@ jobs:
           chmod +x linuxdeploy
           ./linuxdeploy --appdir "$appdir" --output appimage
 
-          mv MkPFS-*-x86_64.AppImage "MkPFS-${{ matrix.target }}.AppImage"
-          echo "artifact_name=MkPFS-${{ matrix.target }}.AppImage" >> "$GITHUB_ENV"
+          mv MkPFS-*-x86_64.AppImage "${{ matrix.artifact }}"
+          echo "artifact_name=${{ matrix.artifact }}" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
-          name: MkPFS-${{ matrix.target }}
+          name: ${{ matrix.target }}
           path: ${{ env.artifact_name }}
 
   release:

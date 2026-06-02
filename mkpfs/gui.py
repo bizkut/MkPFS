@@ -139,13 +139,13 @@ class MkPFSApp:
             side="left", padx=8, pady=6
         )
         ctk.CTkButton(
-            preset_frame, text="PS4 Compressed", command=lambda: self._apply_pack_preset("PS4", True), width=140
-        ).pack(side="left", padx=4, pady=6)
-        ctk.CTkButton(
             preset_frame, text="PS5 Compressed", command=lambda: self._apply_pack_preset("PS5", True), width=140
         ).pack(side="left", padx=4, pady=6)
         ctk.CTkButton(
-            preset_frame, text="Uncompressed", command=lambda: self._apply_pack_preset("PS4", False), width=140
+            preset_frame, text="PS4 Compressed", command=lambda: self._apply_pack_preset("PS4", True), width=140
+        ).pack(side="left", padx=4, pady=6)
+        ctk.CTkButton(
+            preset_frame, text="Uncompressed", command=lambda: self._apply_pack_preset("PS5", False), width=140
         ).pack(side="left", padx=4, pady=6)
 
         adv_frame: ctk.CTkFrame = ctk.CTkFrame(container)
@@ -154,7 +154,7 @@ class MkPFSApp:
             row=0, column=0, columnspan=4, padx=8, pady=(8, 4), sticky="w"
         )
 
-        self.pack_version_var: tk.StringVar = tk.StringVar(value="PS4")
+        self.pack_version_var: tk.StringVar = tk.StringVar(value="PS5")
         ctk.CTkLabel(adv_frame, text="Version:").grid(row=1, column=0, padx=8, pady=4, sticky="e")
         ctk.CTkOptionMenu(adv_frame, values=["PS4", "PS5"], variable=self.pack_version_var, width=100).grid(
             row=1, column=1, padx=4, pady=4, sticky="w"
@@ -166,7 +166,7 @@ class MkPFSApp:
             row=1, column=3, padx=4, pady=4, sticky="w"
         )
 
-        self.pack_block_var: tk.StringVar = tk.StringVar(value="auto")
+        self.pack_block_var: tk.StringVar = tk.StringVar(value="65536")
         ctk.CTkLabel(adv_frame, text="Block size:").grid(row=2, column=0, padx=8, pady=4, sticky="e")
         ctk.CTkOptionMenu(
             adv_frame,
@@ -175,43 +175,69 @@ class MkPFSApp:
             width=100,
         ).grid(row=2, column=1, padx=4, pady=4, sticky="w")
 
+        self.pack_compression_level_var: tk.StringVar = tk.StringVar(value="9")
+        ctk.CTkLabel(adv_frame, text="Zlib level:").grid(row=2, column=2, padx=8, pady=4, sticky="e")
+        ctk.CTkOptionMenu(
+            adv_frame, values=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
+            variable=self.pack_compression_level_var, width=80
+        ).grid(row=2, column=3, padx=4, pady=4, sticky="w")
+
         self.pack_compress_var: tk.BooleanVar = tk.BooleanVar(value=True)
         ctk.CTkCheckBox(adv_frame, text="Enable PFSC compression", variable=self.pack_compress_var).grid(
             row=3, column=0, columnspan=2, padx=8, pady=4, sticky="w"
         )
 
+        self.pack_skip_exe_var: tk.BooleanVar = tk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            adv_frame, text="Skip executable compression", variable=self.pack_skip_exe_var
+        ).grid(row=3, column=2, columnspan=2, padx=8, pady=4, sticky="w")
+
         self.pack_signed_var: tk.BooleanVar = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(adv_frame, text="Signed image", variable=self.pack_signed_var).grid(
-            row=3, column=2, columnspan=2, padx=8, pady=4, sticky="w"
+            row=4, column=0, columnspan=2, padx=8, pady=4, sticky="w"
         )
 
         self.pack_encrypted_var: tk.BooleanVar = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(adv_frame, text="Encrypted", variable=self.pack_encrypted_var).grid(
-            row=4, column=0, columnspan=2, padx=8, pady=4, sticky="w"
+            row=4, column=2, columnspan=2, padx=8, pady=4, sticky="w"
         )
 
         self.pack_case_var: tk.BooleanVar = tk.BooleanVar(value=True)
         ctk.CTkCheckBox(adv_frame, text="Case insensitive", variable=self.pack_case_var).grid(
-            row=4, column=2, columnspan=2, padx=8, pady=4, sticky="w"
+            row=5, column=0, columnspan=2, padx=8, pady=4, sticky="w"
         )
 
         self.pack_verify_var: tk.BooleanVar = tk.BooleanVar(value=True)
         ctk.CTkCheckBox(adv_frame, text="Verify after pack", variable=self.pack_verify_var).grid(
-            row=5, column=0, columnspan=2, padx=8, pady=4, sticky="w"
+            row=5, column=2, columnspan=2, padx=8, pady=4, sticky="w"
         )
 
         self.pack_require_game_var: tk.BooleanVar = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             adv_frame, text="Require game files (param.json + eboot.bin)", variable=self.pack_require_game_var
-        ).grid(row=5, column=2, columnspan=2, padx=8, pady=4, sticky="w")
+        ).grid(row=6, column=0, columnspan=2, padx=8, pady=4, sticky="w")
+
+        ctk.CTkLabel(adv_frame, text="Min compress size:").grid(row=6, column=2, padx=8, pady=4, sticky="e")
+        self.pack_min_size_var: tk.StringVar = tk.StringVar(value="65536")
+        ctk.CTkEntry(adv_frame, textvariable=self.pack_min_size_var, width=100).grid(
+            row=6, column=3, padx=4, pady=4, sticky="w"
+        )
+
+        ctk.CTkLabel(adv_frame, text="Max compressed ratio (%):").grid(
+            row=7, column=0, padx=8, pady=4, sticky="e"
+        )
+        self.pack_max_ratio_var: tk.StringVar = tk.StringVar(value="95")
+        ctk.CTkEntry(adv_frame, textvariable=self.pack_max_ratio_var, width=100).grid(
+            row=7, column=1, padx=4, pady=4, sticky="w"
+        )
 
         ctk.CTkLabel(adv_frame, text="EKPFS key (hex, optional):").grid(
-            row=6, column=0, padx=8, pady=4, sticky="e"
+            row=8, column=0, padx=8, pady=4, sticky="e"
         )
         self.pack_ekpfs_var: tk.StringVar = tk.StringVar()
         ctk.CTkEntry(
             adv_frame, textvariable=self.pack_ekpfs_var, width=420, placeholder_text="64 hex chars or leave blank"
-        ).grid(row=6, column=1, columnspan=3, padx=4, pady=4, sticky="w")
+        ).grid(row=8, column=1, columnspan=3, padx=4, pady=4, sticky="w")
 
         ctk.CTkButton(
             container,
@@ -493,12 +519,16 @@ class MkPFSApp:
         self.pack_version_var.set(version)
         self.pack_compress_var.set(compress)
         self.pack_inode_var.set("32")
-        self.pack_block_var.set("auto")
+        self.pack_block_var.set("65536")
+        self.pack_compression_level_var.set("9")
+        self.pack_skip_exe_var.set(True)
         self.pack_signed_var.set(False)
         self.pack_encrypted_var.set(False)
         self.pack_case_var.set(True)
         self.pack_verify_var.set(True)
         self.pack_require_game_var.set(False)
+        self.pack_min_size_var.set("65536")
+        self.pack_max_ratio_var.set("95")
         self.pack_ekpfs_var.set("")
         info = f"Applied preset: {version}"
         if compress:
@@ -531,6 +561,11 @@ class MkPFSApp:
         ]
         if not self.pack_compress_var.get():
             argv.append("--no-compress")
+        argv.extend(["--compression-level", self.pack_compression_level_var.get()])
+        if self.pack_skip_exe_var.get():
+            argv.append("--skip-executable-compression")
+        argv.extend(["--min-compress-size", self.pack_min_size_var.get()])
+        argv.extend(["--max-compressed-ratio", self.pack_max_ratio_var.get()])
         if self.pack_signed_var.get():
             argv.append("--signed")
         if self.pack_encrypted_var.get():
