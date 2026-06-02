@@ -698,6 +698,24 @@ class TestCliCreateRun(CliTestCase):
         ):
             cli.cli_mkpfs_create_run(args)
 
+    def test_create_run_requires_game_files_by_default_for_ps5_profile(self) -> None:
+        """Pack should default to require game files when using the PS5 version profile."""
+        tmp_path: Path = self.make_temp_path()
+        source_path: Path = tmp_path / "src"
+        source_path.mkdir()
+        args: SimpleNamespace = self.make_create_args(
+            source_path=source_path,
+            image_path=tmp_path / "out",
+            dry_run=True,
+            verify=False,
+        )
+        args.version = "PS5"
+        args.require_game_files = False
+        with patch.object(cli, "build_pfs", side_effect=AssertionError("build should not run")), self.assertRaises(
+            BuildError
+        ):
+            cli.cli_mkpfs_create_run(args)
+
     def test_create_run_passes_new_crypt_flag_through_to_build(self) -> None:
         """Create run should forward the newCrypt compatibility flag into the builder."""
         tmp_path: Path = self.make_temp_path()

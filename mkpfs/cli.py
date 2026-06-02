@@ -582,7 +582,7 @@ def cli_mkpfs_add_create_args(
         parser.add_argument(
             "--require-game-files",
             action="store_true",
-            help="Require sce_sys/param.json and eboot.bin before packing",
+            help="Require sce_sys/param.json and eboot.bin before packing (enabled by default for PS5 profile)",
         )
     parser.add_argument("--verbose", action="store_true", help="Verbose per-file decisions")
     parser.add_argument("--dry-run", action="store_true", help="Scan/layout/report only; do not write image")
@@ -836,7 +836,8 @@ def cli_mkpfs_create_run(args: argparse.Namespace) -> int:
             compare_source_root=source_path,
             display_source_path=source_path,
             temp_folder=temp_folder,
-            require_game_files=bool(getattr(args, "require_game_files", False)),
+            require_game_files=bool(getattr(args, "require_game_files", False))
+            or (getattr(args, "version", "PS4") == "PS5"),
             desired_output_suffix=".ffpfsc",
             output_adjustment_message=(
                 "The folder does not seem to contain any direct game information, "
@@ -865,7 +866,8 @@ def cli_mkpfs_create_run(args: argparse.Namespace) -> int:
                 compare_source_root=game_root,
                 display_source_path=source_path,
                 temp_folder=temp_folder,
-                require_game_files=bool(getattr(args, "require_game_files", False)),
+                require_game_files=bool(getattr(args, "require_game_files", False))
+                or (getattr(args, "version", "PS4") == "PS5"),
                 desired_output_suffix=".ffpfs",
                 output_adjustment_message=(
                     "Raw game files detected inside the source folder, adjusting output file extension to .ffpfs"
@@ -936,7 +938,8 @@ def cli_mkpfs_pack_archive_run(args: argparse.Namespace) -> int:
                 compare_source_root=staging_root,
                 display_source_path=source_archive,
                 temp_folder=temp_folder,
-                require_game_files=bool(getattr(args, "require_game_files", False)),
+                require_game_files=bool(getattr(args, "require_game_files", False))
+                or (getattr(args, "version", "PS4") == "PS5"),
                 desired_output_suffix=".ffpfsc",
                 output_adjustment_message=(
                     "The archive does not seem to contain any direct game information, "
@@ -965,7 +968,8 @@ def cli_mkpfs_pack_archive_run(args: argparse.Namespace) -> int:
                     compare_source_root=game_root,
                     display_source_path=source_archive,
                     temp_folder=temp_folder,
-                    require_game_files=bool(getattr(args, "require_game_files", False)),
+                    require_game_files=bool(getattr(args, "require_game_files", False))
+                    or (getattr(args, "version", "PS4") == "PS5"),
                     desired_output_suffix=".ffpfs",
                     output_adjustment_message=(
                         "Raw game files detected inside the source archive, adjusting output file extension to .ffpfs"
