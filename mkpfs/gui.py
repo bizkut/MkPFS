@@ -397,7 +397,7 @@ class MkPFSApp:
             log_frame,
             height=200,
             wrap="word",
-            font=ctk.CTkFont(family="SF Mono", size=11),
+            font=ctk.CTkFont(family="Courier", size=11),
         )
         self.log_text.grid(row=0, column=0, padx=8, pady=8, sticky="nsew")
         self.log_text.configure(state="disabled")
