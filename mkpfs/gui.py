@@ -81,7 +81,7 @@ class MkPFSApp:
         self.root: ctk.CTk = root
         self.log_queue: queue.Queue[tuple[str, str]] = queue.Queue(maxsize=self._QUEUE_MAXSIZE)
         self.progress_queue: queue.Queue[tuple[float, str]] = queue.Queue(maxsize=self._QUEUE_MAXSIZE)
-        self.completion_queue: queue.Queue[None] = queue.Queue(maxsize=self._QUEUE_MAXSIZE)
+        self.completion_queue: queue.Queue[tuple[str, bool]] = queue.Queue(maxsize=self._QUEUE_MAXSIZE)
         self.worker_thread: threading.Thread | None = None
         self.action_buttons: list[ctk.CTkButton] = []
         self.is_closing: bool = False
@@ -815,16 +815,16 @@ class MkPFSApp:
         """
         if self.is_closing:
             return
-        completed: bool = False
+        completed_info: tuple[str, bool] | None = None
         try:
             while True:
-                self.completion_queue.get_nowait()
-                completed = True
+                completed_info = self.completion_queue.get_nowait()
         except queue.Empty:
             pass
-        if completed:
+        if completed_info is not None:
+            name, is_success = completed_info
             self._drain_progress_queue()
-            self._on_worker_done()
+            self._on_worker_done(name, is_success)
         self.completion_after_id = self.root.after(100, self._poll_completion_queue)
 
     _MAX_LOG_LINES: int = 5000
@@ -930,16 +930,19 @@ class MkPFSApp:
             old_stderr = sys.stderr
             sys.stdout = GuiLogRedirect(self, "info")
             sys.stderr = GuiLogRedirect(self, "error")
+            is_success: bool = False
             try:
                 result: int | None = target()
                 if result == 0:
                     self.enqueue_log(f"\n{name} completed successfully.\n", "ok")
+                    is_success = True
                 else:
                     self.enqueue_log(f"\n{name} finished with exit code {result}.\n", "warning")
             except SystemExit as exc:
                 code: int = exc.code if isinstance(exc.code, int) else 1
                 if code == 0:
                     self.enqueue_log(f"\n{name} completed successfully.\n", "ok")
+                    is_success = True
                 else:
                     self.enqueue_log(f"\n{name} finished with exit code {code}.\n", "warning")
             except Exception as exc:
@@ -951,12 +954,12 @@ class MkPFSApp:
                 # is virtually always empty. Dropping is safer than blocking a
                 # daemon thread that can no longer be joined.
                 with suppress(queue.Full):
-                    self.completion_queue.put_nowait(None)
+                    self.completion_queue.put_nowait((name, is_success))
 
         self.worker_thread = threading.Thread(target=wrapper, daemon=True)
         self.worker_thread.start()
 
-    def _on_worker_done(self) -> None:
+    def _on_worker_done(self, name: str, is_success: bool) -> None:
         self.progress_bar.stop()
         self.progress_bar.configure(mode="determinate")
         self.progress_var.set(1.0)
@@ -970,6 +973,13 @@ class MkPFSApp:
                     q.get_nowait()
             except queue.Empty:
                 pass
+
+        if is_success:
+            messagebox.showinfo("Success", f"{name} operation completed successfully!")
+        else:
+            messagebox.showerror(
+                "Error", f"{name} operation finished with errors.\nCheck the log console below for details."
+            )
 
     def _apply_pack_preset(self, version: str, compress: bool) -> None:
         """Apply a named preset to the Pack Folder tab controls.
