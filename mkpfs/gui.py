@@ -634,6 +634,22 @@ class MkPFSApp:
         self.log_text.grid(row=0, column=0, padx=8, pady=8, sticky="nsew")
         self.log_text.configure(state="disabled")
 
+        # Configure color tags for modern terminal look
+        self.log_text.tag_config(
+            "header", foreground="#38bdf8", font=ctk.CTkFont(family="Courier", size=11, weight="bold")
+        )
+        self.log_text.tag_config(
+            "section", foreground="#c084fc", font=ctk.CTkFont(family="Courier", size=11, weight="bold")
+        )
+        self.log_text.tag_config("success", foreground="#34d399")
+        self.log_text.tag_config("warning", foreground="#fbbf24")
+        self.log_text.tag_config(
+            "error", foreground="#f87171", font=ctk.CTkFont(family="Courier", size=11, weight="bold")
+        )
+        self.log_text.tag_config("label", foreground="#94a3b8")
+        self.log_text.tag_config("value", foreground="#f1f5f9")
+        self.log_text.tag_config("info", foreground="#cbd5e1")
+
     def _on_close(self) -> None:
         """Cancel scheduled UI polling callbacks and close the window.
 
@@ -828,7 +844,62 @@ class MkPFSApp:
 
     def _append_log(self, text: str) -> None:
         self.log_text.configure(state="normal")
-        self.log_text.insert("end", text)
+        lines: list[str] = text.split("\n")
+        for i, line in enumerate(lines):
+            suffix: str = "\n" if i < len(lines) - 1 else ""
+            stripped: str = line.strip()
+
+            if stripped.startswith("===") or stripped.endswith("==="):
+                self.log_text.insert("end", line + suffix, "header")
+                continue
+
+            if stripped in (
+                "PFS Image Builder - Parameters",
+                "Build Summary",
+                "PFS Check Report",
+                "Build Details",
+                "PFS Image Info",
+                "PFS Image Inspection",
+            ):
+                self.log_text.insert("end", line + suffix, "section")
+                continue
+
+            if any(
+                term in line
+                for term in (
+                    "Error:",
+                    "error:",
+                    "ERROR:",
+                    "failed:",
+                    "failed",
+                    "mismatch",
+                    "escapes",
+                    "NameError",
+                    "BuildError",
+                    "ValueError",
+                    "Exception",
+                    "FileNotFoundError",
+                )
+            ):
+                self.log_text.insert("end", line + suffix, "error")
+                continue
+
+            if any(term in line.lower() for term in ("warning", "warn", "stale")):
+                self.log_text.insert("end", line + suffix, "warning")
+                continue
+
+            if any(term in line.lower() for term in ("successfully", "passed", "✓")) or "completed" in line.lower():
+                self.log_text.insert("end", line + suffix, "success")
+                continue
+
+            if line.startswith("  ") and ":" in line:
+                parts: list[str] = line.split(":", 1)
+                self.log_text.insert("end", parts[0] + ":", "label")
+                self.log_text.insert("end", parts[1] + suffix, "value")
+                continue
+
+            self.log_text.insert("end", line + suffix, "info")
+
         self._trim_log()
         self.log_text.configure(state="disabled")
         self.log_text.see("end")
