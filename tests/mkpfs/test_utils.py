@@ -82,3 +82,16 @@ class TestUtilityFileHelpers(unittest.TestCase):
         truncated: BytesIO = BytesIO(b"abc")
         with self.assertRaises(ValueError):
             utils._read_exact(truncated, 0, 10)
+
+    def test_resolve_temp_root_defaults_to_local_tmp_if_exists(self) -> None:
+        """resolve_temp_root should prefer local ./tmp subdirectory if available and writable."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path: Path = Path(tmp_dir)
+            local_tmp: Path = tmp_path / "tmp"
+            local_tmp.mkdir()
+
+            from unittest.mock import patch
+
+            with patch("mkpfs.utils._app_directory", return_value=tmp_path):
+                resolved: Path = utils.resolve_temp_root(None)
+                self.assertEqual(resolved, local_tmp)

@@ -107,6 +107,17 @@ def resolve_temp_root(temp_folder: Path | None = None) -> Path:
         temp_root.mkdir(parents=True, exist_ok=True)
         return temp_root
 
+    # Try local ./tmp folder under app directory first to avoid space or OS pruning issues in system temp
+    try:
+        local_tmp: Path = _app_directory() / "tmp"
+        if local_tmp.is_dir():
+            test_file: Path = local_tmp / ".write_test"
+            test_file.write_text("ok")
+            test_file.unlink()
+            return local_tmp
+    except OSError:
+        pass
+
     return Path(tempfile.gettempdir())
 
 
