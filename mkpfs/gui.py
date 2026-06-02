@@ -442,14 +442,16 @@ class MkPFSApp:
         self._poll_log_queue()
 
     def _poll_log_queue(self) -> None:
+        chunks: list[str] = []
         try:
             while True:
                 text, _tag = self.log_queue.get_nowait()
-                self._append_log(text)
+                chunks.append(text)
         except queue.Empty:
             pass
-        finally:
-            self.root.after(100, self._poll_log_queue)
+        if chunks:
+            self._append_log("".join(chunks))
+        self.root.after(100, self._poll_log_queue)
 
     def _append_log(self, text: str) -> None:
         self.log_text.configure(state="normal")
