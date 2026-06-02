@@ -282,6 +282,9 @@ def get_destination_space_error_message(*, source_root: Path, output_path: Path)
         Error text when free destination space is insufficient, otherwise
         ``None``.
     """
+    if os.environ.get("MKPFS_SKIP_DEST_SPACE_CHECK") == "1":
+        return None
+
     required_raw_size_bytes: int = calculate_source_raw_size_bytes(source_root=source_root)
     probe_path: Path = resolve_disk_usage_probe_path(output_path=output_path)
     free_space_bytes: int = shutil.disk_usage(path=probe_path).free
