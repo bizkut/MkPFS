@@ -177,9 +177,10 @@ jobs:
             echo "## Changes"
             echo ""
             if [ -z "$prev" ]; then
-              git log --pretty=format:'- %s' --no-merges
+              # First release: limit to last 30 days to avoid dumping entire upstream history
+              git log --pretty=format:'- %s' --no-merges --since="30 days ago" | awk '!seen[$0]++'
             else
-              git log --pretty=format:'- %s' --no-merges "${prev}..${tag}"
+              git log --pretty=format:'- %s' --no-merges "${prev}..${tag}" | awk '!seen[$0]++'
             fi
           } > release_notes.md
           echo "body_path=release_notes.md" >> "$GITHUB_OUTPUT"
