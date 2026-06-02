@@ -10,6 +10,8 @@ import time
 
 from .utils import human_readable_size
 
+_cancellation_requested: bool = False
+
 
 class Progress:
     """Simple terminal progress helper used by CLI build flows.
@@ -41,6 +43,9 @@ class Progress:
             bytes_processed: Optional number of bytes processed; when provided
                 the progress will display byte-based throughput and ETA.
         """
+        global _cancellation_requested
+        if _cancellation_requested:
+            raise KeyboardInterrupt("Operation cancelled by user")
         if not self.enabled:
             return
 
@@ -99,6 +104,9 @@ class Progress:
         This always writes to stderr so CLI output and progress remain separate
         from normal stdout usage.
         """
+        global _cancellation_requested
+        if _cancellation_requested:
+            raise KeyboardInterrupt("Operation cancelled by user")
         if not self.enabled:
             return
         sys.stderr.write(message + "\n")

@@ -88,6 +88,8 @@ class MkPFSApp:
         self.log_after_id: str | None = None
         self.progress_after_id: str | None = None
         self.completion_after_id: str | None = None
+        self.is_cancelled: bool = False
+        self.active_tmp_file: Path | None = None
 
         self._setup_window()
         self._build_ui()
@@ -608,13 +610,19 @@ class MkPFSApp:
         self.progress_frame: ctk.CTkFrame = ctk.CTkFrame(self.root)
         self.progress_frame.grid(row=2, column=0, padx=12, pady=(4, 0), sticky="ew")
         self.progress_frame.columnconfigure(0, weight=1)
+        self.progress_frame.columnconfigure(1, weight=0)
 
         self.progress_var: tk.DoubleVar = tk.DoubleVar(value=0.0)
         self.progress_bar: ctk.CTkProgressBar = ctk.CTkProgressBar(
             self.progress_frame, variable=self.progress_var, mode="determinate"
         )
         self.progress_bar.set(0.0)
-        self.progress_bar.grid(row=0, column=0, padx=10, pady=(8, 4), sticky="ew")
+        self.progress_bar.grid(row=0, column=0, padx=(10, 4), pady=(8, 4), sticky="ew")
+
+        self.cancel_button: ctk.CTkButton = ctk.CTkButton(
+            self.progress_frame, text="Cancel", command=self._on_cancel, width=80, state="disabled"
+        )
+        self.cancel_button.grid(row=0, column=1, padx=(4, 10), pady=(8, 4), sticky="e")
 
         self.progress_label: ctk.CTkLabel = ctk.CTkLabel(self.progress_frame, text="Ready")
         self.progress_label.grid(row=1, column=0, padx=10, pady=(0, 6), sticky="w")
@@ -650,12 +658,40 @@ class MkPFSApp:
         Returns:
             None.
         """
-        self.is_closing = True
+        self.is_closing: bool = True
         for after_id in (self.log_after_id, self.progress_after_id, self.completion_after_id):
             if after_id is not None:
                 with suppress(tk.TclError):
                     self.root.after_cancel(after_id)
+        self._cleanup_temp_files()
         self.root.destroy()
+
+    def _cleanup_temp_files(self) -> None:
+        if self.active_tmp_file is not None:
+            try:
+                if self.active_tmp_file.exists():
+                    self.active_tmp_file.unlink()
+            except Exception as exc:
+                print(f"Failed to delete active temp file {self.active_tmp_file}: {exc}", file=sys.stderr)
+            self.active_tmp_file = None
+
+        try:
+            import shutil
+
+            from mkpfs.utils import resolve_temp_root
+
+            temp_root: Path = resolve_temp_root()
+            if temp_root.exists() and temp_root.is_dir():
+                for item in temp_root.iterdir():
+                    try:
+                        if item.is_file() or item.is_symlink():
+                            item.unlink()
+                        elif item.is_dir():
+                            shutil.rmtree(item)
+                    except Exception as exc:
+                        print(f"Failed to delete temp file/folder {item}: {exc}", file=sys.stderr)
+        except Exception as exc:
+            print(f"Failed to clean up temporary directory: {exc}", file=sys.stderr)
 
     def _register_action_button(self, button: ctk.CTkButton) -> None:
         """Track a primary action button so running workers can disable it.
@@ -918,6 +954,11 @@ class MkPFSApp:
         self.progress_bar.configure(mode="indeterminate")
         self.progress_bar.start()
         self._set_action_buttons_enabled(False)
+        self.is_cancelled = False
+        from mkpfs import pbar
+
+        pbar._cancellation_requested = False
+        self.cancel_button.configure(state="normal")
 
         def wrapper() -> None:
             old_stdout = sys.stdout
@@ -939,6 +980,8 @@ class MkPFSApp:
                     is_success = True
                 else:
                     self.enqueue_log(f"\n{name} finished with exit code {code}.\n", "warning")
+            except KeyboardInterrupt:
+                self.enqueue_log(f"\n{name} was cancelled by the user.\n", "warning")
             except Exception as exc:
                 print(f"Unhandled error during {name}: {exc}", file=sys.stderr)
             finally:
@@ -959,7 +1002,18 @@ class MkPFSApp:
         self.progress_var.set(1.0)
         self.progress_label.configure(text="Done")
         self._set_action_buttons_enabled(True)
+        self.cancel_button.configure(state="disabled")
         self.worker_thread = None
+
+        # Clean up active temp file
+        if self.active_tmp_file is not None:
+            try:
+                if self.active_tmp_file.exists():
+                    self.active_tmp_file.unlink()
+            except Exception as exc:
+                print(f"Failed to delete active temp file {self.active_tmp_file}: {exc}", file=sys.stderr)
+            self.active_tmp_file = None
+
         # Drain any leftover queue items to free references and prevent memory growth.
         for q in (self.log_queue, self.progress_queue, self.completion_queue):
             try:
@@ -968,12 +1022,23 @@ class MkPFSApp:
             except queue.Empty:
                 pass
 
-        if is_success:
+        if self.is_cancelled:
+            messagebox.showinfo("Cancelled", f"{name} operation was cancelled.")
+            self.is_cancelled = False
+        elif is_success:
             messagebox.showinfo("Success", f"{name} operation completed successfully!")
         else:
             messagebox.showerror(
                 "Error", f"{name} operation finished with errors.\nCheck the log console below for details."
             )
+
+    def _on_cancel(self) -> None:
+        self.is_cancelled = True
+        from mkpfs import pbar
+
+        pbar._cancellation_requested = True
+        self.cancel_button.configure(state="disabled")
+        self.progress_label.configure(text="Cancelling...")
 
     def _apply_pack_preset(self, version: str, compress: bool) -> None:
         """Apply a named preset to the Pack Folder tab controls.
@@ -1071,6 +1136,7 @@ class MkPFSApp:
         ekpfs: str = self.pack_ekpfs_var.get().strip()
         if ekpfs:
             argv.extend(["--ekpfs-key", ekpfs])
+        self.active_tmp_file = Path(output + ".tmp")
         self._run_worker("Pack Folder", lambda: self._do_pack_folder(argv))
 
     def _do_pack_folder(self, argv: list[str]) -> int:
@@ -1095,6 +1161,7 @@ class MkPFSApp:
             argv.append("--no-compress")
         if self.pack_file_verify_var.get():
             argv.append("--verify")
+        self.active_tmp_file = Path(output + ".tmp")
         self._run_worker("Pack File", lambda: self._do_pack_file(argv))
 
     def _do_pack_file(self, argv: list[str]) -> int:
@@ -1154,6 +1221,7 @@ class MkPFSApp:
         ekpfs: str = self.pack_archive_ekpfs_var.get().strip()
         if ekpfs:
             argv.extend(["--ekpfs-key", ekpfs])
+        self.active_tmp_file = Path(output + ".tmp")
         self._run_worker("Pack Archive", lambda: self._do_pack_archive(argv))
 
     def _do_pack_archive(self, argv: list[str]) -> int:
