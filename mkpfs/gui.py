@@ -635,17 +635,11 @@ class MkPFSApp:
         self.log_text.configure(state="disabled")
 
         # Configure color tags for modern terminal look
-        self.log_text.tag_config(
-            "header", foreground="#38bdf8", font=ctk.CTkFont(family="Courier", size=11, weight="bold")
-        )
-        self.log_text.tag_config(
-            "section", foreground="#c084fc", font=ctk.CTkFont(family="Courier", size=11, weight="bold")
-        )
+        self.log_text._textbox.tag_config("header", foreground="#38bdf8", font=("Courier", 11, "bold"))
+        self.log_text._textbox.tag_config("section", foreground="#c084fc", font=("Courier", 11, "bold"))
         self.log_text.tag_config("success", foreground="#34d399")
         self.log_text.tag_config("warning", foreground="#fbbf24")
-        self.log_text.tag_config(
-            "error", foreground="#f87171", font=ctk.CTkFont(family="Courier", size=11, weight="bold")
-        )
+        self.log_text._textbox.tag_config("error", foreground="#f87171", font=("Courier", 11, "bold"))
         self.log_text.tag_config("label", foreground="#94a3b8")
         self.log_text.tag_config("value", foreground="#f1f5f9")
         self.log_text.tag_config("info", foreground="#cbd5e1")
