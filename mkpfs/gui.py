@@ -16,13 +16,12 @@ import tkinter as tk
 from collections.abc import Callable
 from pathlib import Path
 from tkinter import filedialog, messagebox
+
 # CustomTkinter is optional so the CLI stays lightweight.
 try:
     import customtkinter as ctk
 except ImportError as exc:
-    raise ImportError(
-        "mkpfs GUI requires 'customtkinter'. Install it with: uv add customtkinter"
-    ) from exc
+    raise ImportError("mkpfs GUI requires 'customtkinter'. Install it with: uv add customtkinter") from exc
 
 from mkpfs.cli import (
     cli_mkpfs_add_create_args,
@@ -92,9 +91,7 @@ class MkPFSApp:
     def _build_header(self) -> None:
         header: ctk.CTkFrame = ctk.CTkFrame(self.root)
         header.grid(row=0, column=0, padx=12, pady=(12, 6), sticky="ew")
-        ctk.CTkLabel(header, text="MkPFS", font=ctk.CTkFont(size=22, weight="bold")).pack(
-            side="left", padx=10, pady=8
-        )
+        ctk.CTkLabel(header, text="MkPFS", font=ctk.CTkFont(size=22, weight="bold")).pack(side="left", padx=10, pady=8)
         ctk.CTkLabel(
             header,
             text="Create and manage PS4 / PS5 PFS disc images",
@@ -129,9 +126,7 @@ class MkPFSApp:
         )
 
         self.pack_folder_output_var: tk.StringVar = tk.StringVar()
-        self._build_file_picker(
-            container, "Output image", self.pack_folder_output_var, "Save As", self._save_file, 1
-        )
+        self._build_file_picker(container, "Output image", self.pack_folder_output_var, "Save As", self._save_file, 1)
 
         preset_frame: ctk.CTkFrame = ctk.CTkFrame(container)
         preset_frame.grid(row=2, column=0, columnspan=3, padx=4, pady=(12, 4), sticky="ew")
@@ -178,8 +173,10 @@ class MkPFSApp:
         self.pack_compression_level_var: tk.StringVar = tk.StringVar(value="9")
         ctk.CTkLabel(adv_frame, text="Zlib level:").grid(row=2, column=2, padx=8, pady=4, sticky="e")
         ctk.CTkOptionMenu(
-            adv_frame, values=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
-            variable=self.pack_compression_level_var, width=80
+            adv_frame,
+            values=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
+            variable=self.pack_compression_level_var,
+            width=80,
         ).grid(row=2, column=3, padx=4, pady=4, sticky="w")
 
         self.pack_compress_var: tk.BooleanVar = tk.BooleanVar(value=True)
@@ -188,9 +185,9 @@ class MkPFSApp:
         )
 
         self.pack_skip_exe_var: tk.BooleanVar = tk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
-            adv_frame, text="Skip executable compression", variable=self.pack_skip_exe_var
-        ).grid(row=3, column=2, columnspan=2, padx=8, pady=4, sticky="w")
+        ctk.CTkCheckBox(adv_frame, text="Skip executable compression", variable=self.pack_skip_exe_var).grid(
+            row=3, column=2, columnspan=2, padx=8, pady=4, sticky="w"
+        )
 
         self.pack_signed_var: tk.BooleanVar = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(adv_frame, text="Signed image", variable=self.pack_signed_var).grid(
@@ -223,17 +220,13 @@ class MkPFSApp:
             row=6, column=3, padx=4, pady=4, sticky="w"
         )
 
-        ctk.CTkLabel(adv_frame, text="Max compressed ratio (%):").grid(
-            row=7, column=0, padx=8, pady=4, sticky="e"
-        )
+        ctk.CTkLabel(adv_frame, text="Max compressed ratio (%):").grid(row=7, column=0, padx=8, pady=4, sticky="e")
         self.pack_max_ratio_var: tk.StringVar = tk.StringVar(value="95")
         ctk.CTkEntry(adv_frame, textvariable=self.pack_max_ratio_var, width=100).grid(
             row=7, column=1, padx=4, pady=4, sticky="w"
         )
 
-        ctk.CTkLabel(adv_frame, text="EKPFS key (hex, optional):").grid(
-            row=8, column=0, padx=8, pady=4, sticky="e"
-        )
+        ctk.CTkLabel(adv_frame, text="EKPFS key (hex, optional):").grid(row=8, column=0, padx=8, pady=4, sticky="e")
         self.pack_ekpfs_var: tk.StringVar = tk.StringVar()
         ctk.CTkEntry(
             adv_frame, textvariable=self.pack_ekpfs_var, width=420, placeholder_text="64 hex chars or leave blank"
@@ -410,9 +403,7 @@ class MkPFSApp:
         self.log_text.configure(state="disabled")
 
     def _build_status_bar(self) -> None:
-        self.status_bar: ctk.CTkLabel = ctk.CTkLabel(
-            self.root, text="Ready", anchor="w", font=ctk.CTkFont(size=11)
-        )
+        self.status_bar: ctk.CTkLabel = ctk.CTkLabel(self.root, text="Ready", anchor="w", font=ctk.CTkFont(size=11))
         self.status_bar.grid(row=4, column=0, padx=12, pady=(2, 8), sticky="ew")
 
     def _browse(self, var: tk.StringVar, dialog: Callable[[], str | None]) -> None:

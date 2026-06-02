@@ -4,12 +4,12 @@ This file is used by PyInstaller to produce a single-file executable.
 Run it locally with:
 
     uv run pyinstaller --onefile --windowed \
-        --collect-data customtkinter scripts/gui-entry.py
+        --hidden-import tkinter \
+        --collect-data customtkinter \
+        scripts/gui-entry.py
 """
 
 from __future__ import annotations
-
-import sys
 
 from mkpfs.gui import run_gui
 
