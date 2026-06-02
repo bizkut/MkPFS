@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 from pathlib import Path
 from typing import BinaryIO
@@ -73,8 +74,27 @@ def normalize_output_path(path_arg: str, desired_suffix: str, adjust: bool = Tru
     return normalized, True
 
 
+def _app_directory() -> Path:
+    """Return the directory where the application is installed or running.
+
+    For frozen builds (PyInstaller etc.) this is the executable parent folder.
+    For source runs it is the project root (parent of the mkpfs package).
+
+    Returns:
+        Absolute path to the app directory.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
 def resolve_temp_root(temp_folder: Path | None = None) -> Path:
     """Resolve the temporary root directory used for pack artifacts.
+
+    Uses the caller-provided folder when given, otherwise falls back to the
+    system temporary directory. Large archive extractions should use the
+    system temp folder; the app directory is reserved for small persistent
+    caches such as downloaded decompression backends.
 
     Args:
         temp_folder: Optional caller-provided temp directory path.
@@ -82,12 +102,12 @@ def resolve_temp_root(temp_folder: Path | None = None) -> Path:
     Returns:
         Existing directory path used for temporary files.
     """
-    if temp_folder is None:
-        return Path(tempfile.gettempdir())
+    if temp_folder is not None:
+        temp_root: Path = temp_folder.expanduser().resolve()
+        temp_root.mkdir(parents=True, exist_ok=True)
+        return temp_root
 
-    temp_root: Path = temp_folder.expanduser().resolve()
-    temp_root.mkdir(parents=True, exist_ok=True)
-    return temp_root
+    return Path(tempfile.gettempdir())
 
 
 def read_param_json(path: Path) -> dict[str, object]:

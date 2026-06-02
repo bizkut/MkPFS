@@ -25,6 +25,8 @@ jobs:
         uses: astral-sh/setup-uv@v6
       - name: Run tests
         run: SKIP_VENV=1 ./run-tests.sh
+      - name: Check generated changes
+        run: git diff --exit-code
       - name: Format
         run: uvx ruff format . --check --diff
       - name: Lint
@@ -36,7 +38,7 @@ jobs:
       - name: Smoke install wheel
         run: python -m venv /tmp/mkpfs-release-check && /tmp/mkpfs-release-check/bin/python -m pip install dist/*.whl && /tmp/mkpfs-release-check/bin/python -c "import mkpfs; print('mkpfs imported successfully')"
       - name: Store the distribution packages
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: python-package-distributions
           path: dist/
@@ -54,7 +56,7 @@ jobs:
       id-token: write  # IMPORTANT: mandatory for trusted publishing
     steps:
       - name: Download all the dists
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: python-package-distributions
           path: dist/

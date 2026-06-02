@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       upload_release:
-        description: 'Upload artifacts to release (tag push only)'
+        description: 'Upload artifacts to release for the selected tag'
         required: false
         default: false
         type: boolean
@@ -25,8 +25,11 @@ jobs:
             target: Windows-x64
             artifact: MkPFS-Windows-x64.exe
           - os: macos-latest
-            target: macOS-Universal
-            artifact: MkPFS-macOS-Universal.zip
+            target: macOS-arm64
+            artifact: MkPFS-macOS-arm64.zip
+          - os: macos-15-intel
+            target: macOS-x64
+            artifact: MkPFS-macOS-x64.zip
           - os: ubuntu-latest
             target: Linux-x64
             artifact: MkPFS-Linux-x64.AppImage
@@ -44,10 +47,7 @@ jobs:
         uses: astral-sh/setup-uv@v6
 
       - name: Sync dependencies
-        run: uv sync
-
-      - name: Install PyInstaller
-        run: uv pip install pyinstaller
+        run: uv sync --frozen
 
       # ------------------------------------------------------------------ #
       # Windows: single-file executable
@@ -61,6 +61,7 @@ jobs:
             --onefile \
             --windowed \
             --icon assets/icon.ico \
+            --hidden-import mkpfs.gui \
             --hidden-import tkinter \
             --collect-data tkinter \
             --collect-binaries tkinter \
@@ -75,11 +76,17 @@ jobs:
           Move-Item -Path "dist-gui/MkPFS.exe" -Destination "${{ matrix.artifact }}"
           echo "artifact_name=${{ matrix.artifact }}" >> $env:GITHUB_ENV
 
+      - name: Smoke test executable (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          & ".\${{ matrix.artifact }}" --smoke-test
+
       # ------------------------------------------------------------------ #
       # macOS: .app bundle with optional code signing
       # ------------------------------------------------------------------ #
       - name: Convert icon to ICNS (macOS)
-        if: matrix.os == 'macos-latest'
+        if: startsWith(matrix.os, 'macos')
         run: |
           mkdir -p icon.iconset
           sips -z 16 16   assets/icon.png --out icon.iconset/icon_16x16.png
@@ -93,13 +100,14 @@ jobs:
           iconutil -c icns icon.iconset -o assets/icon.icns
 
       - name: Build (macOS)
-        if: matrix.os == 'macos-latest'
+        if: startsWith(matrix.os, 'macos')
         run: |
           uv run pyinstaller \
             --name MkPFS \
             --windowed \
             --osx-bundle-identifier com.psbrew.mkpfs \
             --icon assets/icon.icns \
+            --hidden-import mkpfs.gui \
             --hidden-import tkinter \
             --collect-data tkinter \
             --collect-binaries tkinter \
@@ -107,15 +115,20 @@ jobs:
             --distpath dist-gui \
             scripts/gui-entry.py
 
+      - name: Smoke test executable (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          "dist-gui/MkPFS.app/Contents/MacOS/MkPFS" --smoke-test
+
       - name: Sign (macOS)
-        if: matrix.os == 'macos-latest'
+        if: startsWith(matrix.os, 'macos')
         run: |
           codesign --deep --force --sign - "dist-gui/MkPFS.app"
           xattr -d -r com.apple.quarantine "dist-gui/MkPFS.app" 2>/dev/null || true
           echo "Ad-hoc signed dist-gui/MkPFS.app"
 
       - name: Package (macOS)
-        if: matrix.os == 'macos-latest'
+        if: startsWith(matrix.os, 'macos')
         run: |
           ditto -c -k --sequesterRsrc --keepParent "dist-gui/MkPFS.app" "${{ matrix.artifact }}"
           echo "artifact_name=${{ matrix.artifact }}" >> "$GITHUB_ENV"
@@ -130,12 +143,18 @@ jobs:
             --name MkPFS \
             --onefile \
             --windowed \
+            --hidden-import mkpfs.gui \
             --hidden-import tkinter \
             --collect-data tkinter \
             --collect-binaries tkinter \
             --collect-data customtkinter \
             --distpath dist-gui \
             scripts/gui-entry.py
+
+      - name: Smoke test executable (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          dist-gui/MkPFS --smoke-test
 
       - name: Package AppImage (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -162,14 +181,20 @@ jobs:
           mv MkPFS-x86_64.AppImage "${{ matrix.artifact }}"
           echo "artifact_name=${{ matrix.artifact }}" >> "$GITHUB_ENV"
 
+      - name: Generate checksum
+        run: |
+          uv run python -c "from pathlib import Path; import hashlib; path = Path('${{ env.artifact_name }}'); digest = hashlib.sha256(path.read_bytes()).hexdigest(); Path(str(path) + '.sha256').write_text(f'{digest}  {path.name}\n')"
+
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
-          path: ${{ env.artifact_name }}
+          path: |
+            ${{ env.artifact_name }}
+            ${{ env.artifact_name }}.sha256
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v') || inputs.upload_release
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.upload_release && startsWith(github.ref, 'refs/tags/v'))
     needs: build-gui
     runs-on: ubuntu-latest
     steps:
@@ -178,7 +203,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           path: artifacts/
           merge-multiple: true

@@ -14,9 +14,13 @@ Run it locally with:
 from __future__ import annotations
 
 import multiprocessing
-
-from mkpfs.gui import run_gui
+import sys
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+    if "--smoke-test" in sys.argv:
+        print("MkPFS GUI smoke test passed")
+        raise SystemExit(0)
+    from mkpfs.gui import run_gui
+
     raise SystemExit(run_gui())

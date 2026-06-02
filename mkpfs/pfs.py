@@ -2662,7 +2662,10 @@ def build_pfs(
                 inode.size_compressed = inode.size
             else:
                 if inode.flags & consts.INODE_FLAG_COMPRESSED:
+                    # Compressed file: `size` = stored (PFSC) size, `size_compressed` = logical raw size.
+                    # This matches the unsigned layout set at inode creation time.
                     inode.size = payload_size
+                    inode.size_compressed = inode.size_compressed  # already set from FileNode.raw_size
                 else:
                     inode.size = payload_size
                     inode.size_compressed = inode.size
@@ -3279,9 +3282,7 @@ def verify_signed_image_signatures(
                 )
                 if inode.ib_sig[0] != hmac_sha256(sign_key, ib0_data):
                     errors.append(f"inode {inode.number} indirect signature mismatch at ib[0] -> block {ib0}")
-                    records = parse_sig_record_block(
-                        fh, ib0, inode_bits, header=header, ekpfs=ekpfs, new_crypt=new_crypt
-                    )
+                records = parse_sig_record_block(fh, ib0, inode_bits, header=header, ekpfs=ekpfs, new_crypt=new_crypt)
                 take = min(remaining, sigs_per_block)
                 for rec_idx, (sig, block) in enumerate(records[:take]):
                     if block <= 0:
@@ -4144,7 +4145,7 @@ def inspect_pfs_image(
                     return inspection
 
                 case_insensitive: bool = bool(header.mode & consts.PFS_MODE_CASE_INSENSITIVE)
-                expected_fpt: dict = build_expected_fpt(
+                expected_fpt: dict[int, list[tuple[str, bool, int]]] = build_expected_fpt(
                     inspection.file_inodes, inspection.dir_inodes, case_insensitive
                 )
 

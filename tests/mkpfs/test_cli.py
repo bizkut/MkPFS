@@ -118,7 +118,7 @@ class TestCliSmokeIntegration(unittest.TestCase):
             cli_mkpfs_main(["-h"])
 
         self.assertEqual(excinfo.exception.code, 0)
-        self.assertIn("CLI for pack folder/file, verify, inspect, tree, and unpack PFS operations", buffer.getvalue())
+        self.assertIn("CLI for pack folder/file/archive, verify, inspect, tree, and unpack PFS", buffer.getvalue())
 
     def test_verify_subcommand_help_lists_expected_options(self) -> None:
         """The verify subcommand help should list the image and source options."""
@@ -472,12 +472,12 @@ class TestCliPromptOverwrite(CliTestCase):
         os.utime(stale_spool_path, times=(100.0, 100.0))
         os.utime(fresh_spool_path, times=(990.0, 990.0))
 
-        with patch.object(cli.tempfile, "gettempdir", return_value=str(temp_root)), patch.object(
+        with patch.object(
             cli.time,
             "time",
             return_value=1000.0,
         ):
-            cli.cleanup_pack_temp_artifacts(output_path=output_path, stale_age_seconds=300)
+            cli.cleanup_pack_temp_artifacts(output_path=output_path, temp_folder=temp_root, stale_age_seconds=300)
 
         self.assertFalse(output_tmp_path.exists())
         self.assertFalse(stale_spool_path.exists())
@@ -559,6 +559,26 @@ class TestCliOutputFormatting(CliTestCase):
         self.assertIn("Magic:    PFS (20130315)", output_text)
         self.assertIn("warn", output_text)
         self.assertIn("err", output_text)
+
+    def test_inspect_run_forwards_new_crypt_and_ekpfs(self) -> None:
+        """Inspecting should forward new_crypt and ekpfs options to the library function."""
+        inspection: PFSImageInspection = PFSImageInspection(image=Path("img.ffpfs"))
+        inspection.header = SimpleNamespace(version=2, block_size=65536, magic=consts.PFS_MAGIC)
+        args: SimpleNamespace = SimpleNamespace(
+            image_file="img.ffpfs",
+            format="json",
+            ekpfs_key="12" * 32,
+            new_crypt=True,
+        )
+        stdout_buffer: StringIO = StringIO()
+        with patch.object(cli, "inspect_pfs_image", return_value=inspection) as mock_inspect, redirect_stdout(
+            stdout_buffer
+        ):
+            cli.cli_mkpfs_inspect_run(args)
+
+        mock_inspect.assert_called_once()
+        self.assertEqual(mock_inspect.call_args.kwargs["new_crypt"], True)
+        self.assertEqual(mock_inspect.call_args.kwargs["ekpfs"], bytes.fromhex("12" * 32))
 
 
 class TestCliCreateRun(CliTestCase):

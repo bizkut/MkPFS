@@ -14,6 +14,7 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 
 from . import consts
+from .archive_pack import stage_archive_source_root
 from .logging import error, info, warning
 from .pfs import (
     BuildError,
@@ -815,6 +816,9 @@ def _stage_single_file_source_root(*, source_file: Path, temp_folder: Path | Non
 def cli_mkpfs_create_run(args: argparse.Namespace) -> int:
     """Pack a folder into a PFS image.
 
+    Supports nested game folders by recursively searching for ``sce_sys/param.json``.
+    When multiple games are found, each is packed into a separate image.
+
     Args:
         args: Parsed CLI arguments with ``source_dir`` and ``image_file``.
 
@@ -823,28 +827,57 @@ def cli_mkpfs_create_run(args: argparse.Namespace) -> int:
     """
     source_path: Path = Path(args.source_dir).expanduser().resolve()
     temp_folder: Path = _resolve_pack_temp_folder(args)
-    title_id: str | None = _detect_title_id_from_source(source_path)
-    desired_output_suffix: str = ".ffpfs" if title_id is not None else ".ffpfsc"
-    output_adjustment_message: str
-    if title_id is not None:
-        output_adjustment_message = (
-            "Raw game files detected inside the source folder, adjusting output file extension to .ffpfs"
+    param_files: list[Path] = list(source_path.rglob("sce_sys/param.json"))
+
+    if not param_files:
+        return _run_pack_build(
+            args=args,
+            build_source_root=source_path,
+            compare_source_root=source_path,
+            display_source_path=source_path,
+            temp_folder=temp_folder,
+            require_game_files=bool(getattr(args, "require_game_files", False)),
+            desired_output_suffix=".ffpfsc",
+            output_adjustment_message=(
+                "The folder does not seem to contain any direct game information, "
+                "adjusting output file extension to .ffpfsc"
+            ),
         )
-    else:
-        output_adjustment_message = (
-            "The folder does not seem to contain any direct game information, "
-            "adjusting output file extension to .ffpfsc"
-        )
-    return _run_pack_build(
-        args=args,
-        build_source_root=source_path,
-        compare_source_root=source_path,
-        display_source_path=source_path,
-        temp_folder=temp_folder,
-        require_game_files=bool(getattr(args, "require_game_files", False)),
-        desired_output_suffix=desired_output_suffix,
-        output_adjustment_message=output_adjustment_message,
-    )
+
+    exit_code: int = 0
+    original_image_file: str | None = getattr(args, "image_file", None)
+
+    try:
+        for param_file in param_files:
+            game_root: Path = param_file.parent.parent
+            title_id: str | None = _detect_title_id_from_source(game_root)
+
+            if original_image_file and len(param_files) > 1:
+                orig_path: Path = Path(original_image_file)
+                suffix: str = title_id if title_id else game_root.name
+                if not suffix:
+                    suffix = "game"
+                args.image_file = str(orig_path.with_name(f"{orig_path.stem}_{suffix}.ffpfs"))
+
+            code: int = _run_pack_build(
+                args=args,
+                build_source_root=game_root,
+                compare_source_root=game_root,
+                display_source_path=source_path,
+                temp_folder=temp_folder,
+                require_game_files=bool(getattr(args, "require_game_files", False)),
+                desired_output_suffix=".ffpfs",
+                output_adjustment_message=(
+                    "Raw game files detected inside the source folder, adjusting output file extension to .ffpfs"
+                ),
+            )
+            if code != 0:
+                exit_code = code
+    finally:
+        if original_image_file:
+            args.image_file = original_image_file
+
+    return exit_code
 
 
 def cli_mkpfs_pack_file_run(args: argparse.Namespace) -> int:
@@ -875,6 +908,76 @@ def cli_mkpfs_pack_file_run(args: argparse.Namespace) -> int:
                 "to match the container mode .ffpfsc"
             ),
         )
+
+
+def cli_mkpfs_pack_archive_run(args: argparse.Namespace) -> int:
+    """Pack a ZIP or RAR archive into a PFS image through temporary staging.
+
+    Args:
+        args: Parsed CLI arguments with ``source_archive`` and ``image_file``.
+
+    Returns:
+        Process exit code for the archive packing workflow.
+    """
+    source_archive: Path = Path(args.source_archive).expanduser().resolve()
+    temp_folder: Path = _resolve_pack_temp_folder(args)
+    password: str | None = getattr(args, "password", None)
+    with stage_archive_source_root(
+        archive_path=source_archive,
+        password=password,
+        temp_folder=temp_folder,
+    ) as staging_root:
+        param_files: list[Path] = list(staging_root.rglob("sce_sys/param.json"))
+
+        if not param_files:
+            return _run_pack_build(
+                args=args,
+                build_source_root=staging_root,
+                compare_source_root=staging_root,
+                display_source_path=source_archive,
+                temp_folder=temp_folder,
+                require_game_files=bool(getattr(args, "require_game_files", False)),
+                desired_output_suffix=".ffpfsc",
+                output_adjustment_message=(
+                    "The archive does not seem to contain any direct game information, "
+                    "adjusting output file extension to .ffpfsc"
+                ),
+            )
+
+        exit_code: int = 0
+        original_image_file: str | None = getattr(args, "image_file", None)
+
+        try:
+            for param_file in param_files:
+                game_root: Path = param_file.parent.parent
+                title_id: str | None = _detect_title_id_from_source(game_root)
+
+                if original_image_file and len(param_files) > 1:
+                    orig_path: Path = Path(original_image_file)
+                    suffix: str = title_id if title_id else game_root.name
+                    if not suffix:
+                        suffix = "game"
+                    args.image_file = str(orig_path.with_name(f"{orig_path.stem}_{suffix}.ffpfs"))
+
+                code: int = _run_pack_build(
+                    args=args,
+                    build_source_root=game_root,
+                    compare_source_root=game_root,
+                    display_source_path=source_archive,
+                    temp_folder=temp_folder,
+                    require_game_files=bool(getattr(args, "require_game_files", False)),
+                    desired_output_suffix=".ffpfs",
+                    output_adjustment_message=(
+                        "Raw game files detected inside the source archive, adjusting output file extension to .ffpfs"
+                    ),
+                )
+                if code != 0:
+                    exit_code = code
+        finally:
+            if original_image_file:
+                args.image_file = original_image_file
+
+    return exit_code
 
 
 def cli_mkpfs_check_run(args: argparse.Namespace) -> int:
@@ -1123,11 +1226,11 @@ def cli_mkpfs_extract_run(args: argparse.Namespace) -> int:
 def cli_mkpfs_main_parsers() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mkpfs",
-        description="CLI for pack folder/file, verify, inspect, tree, and unpack PFS operations",
+        description="CLI for pack folder/file/archive, verify, inspect, tree, and unpack PFS operations",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    pack_parser = sub.add_parser("pack", help="Pack a folder or file into an image")
+    pack_parser = sub.add_parser("pack", help="Pack a folder, file, or archive into an image")
     pack_sub = pack_parser.add_subparsers(dest="pack_command", required=True)
 
     folder_parser = pack_sub.add_parser("folder", help="Build image from a source directory")
@@ -1142,6 +1245,15 @@ def cli_mkpfs_main_parsers() -> argparse.ArgumentParser:
         include_require_game_files=False,
     )
     file_parser.set_defaults(func=cli_mkpfs_pack_file_run)
+
+    archive_parser = pack_sub.add_parser("archive", help="Build image from a ZIP or RAR archive")
+    cli_mkpfs_add_create_args(
+        archive_parser,
+        source_arg_name="source_archive",
+        source_help="ZIP or RAR archive to extract and pack",
+    )
+    archive_parser.add_argument("--password", help="Optional ZIP/RAR archive password")
+    archive_parser.set_defaults(func=cli_mkpfs_pack_archive_run)
 
     check_parser = sub.add_parser("verify", help="Validate image structure and payload checksums")
     check_parser.add_argument("image_file", help="Path to input .ffpfs image")
@@ -1212,7 +1324,7 @@ def normalize_cli_argv_for_pack_compat(argv: list[str] | None = None) -> list[st
         return argv
 
     explicit_pack_mode: str = effective_argv[1]
-    if explicit_pack_mode in {"folder", "file"} or explicit_pack_mode.startswith("-"):
+    if explicit_pack_mode in {"folder", "file", "archive"} or explicit_pack_mode.startswith("-"):
         return argv
 
     source_path: Path = Path(explicit_pack_mode).expanduser()
@@ -1246,6 +1358,7 @@ def cli_mkpfs_inspect_run(args: argparse.Namespace) -> int:
     inspection: PFSImageInspection = inspect_pfs_image(
         image=image,
         ekpfs=parse_ekpfs_key_hex(getattr(args, "ekpfs_key", None)),
+        new_crypt=bool(getattr(args, "new_crypt", False)),
     )
 
     if args.format == "json":

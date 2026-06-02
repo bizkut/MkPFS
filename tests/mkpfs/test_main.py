@@ -19,7 +19,7 @@ class TestMainModule(unittest.TestCase):
             cli.cli_mkpfs_main(["-h"])
 
         self.assertEqual(excinfo.exception.code, 0)
-        self.assertIn("CLI for pack folder/file, verify, inspect, tree, and unpack PFS operations", buffer.getvalue())
+        self.assertIn("CLI for pack folder/file/archive, verify, inspect, tree, and unpack PFS", buffer.getvalue())
 
     def test_module_execution_exits_with_the_stubbed_cli_code(self) -> None:
         """Executing ``mkpfs.__main__`` should raise ``SystemExit`` with the CLI return code."""
