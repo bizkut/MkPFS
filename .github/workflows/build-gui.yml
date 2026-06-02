@@ -173,15 +173,14 @@ jobs:
         run: |
           tag="${GITHUB_REF#refs/tags/}"
           prev=$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null || echo "")
-          if [ -z "$prev" ]; then
-            range=""
-          else
-            range="${prev}..${tag}"
-          fi
           {
             echo "## Changes"
             echo ""
-            git log --pretty=format:'- %s' --no-merges "$range"
+            if [ -z "$prev" ]; then
+              git log --pretty=format:'- %s' --no-merges
+            else
+              git log --pretty=format:'- %s' --no-merges "${prev}..${tag}"
+            fi
           } > release_notes.md
           echo "body_path=release_notes.md" >> "$GITHUB_OUTPUT"
 
