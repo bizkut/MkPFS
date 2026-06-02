@@ -491,6 +491,12 @@ class MkPFSApp:
                     self.enqueue_log(f"\n{name} completed successfully.\n", "ok")
                 else:
                     self.enqueue_log(f"\n{name} finished with exit code {result}.\n", "warning")
+            except SystemExit as exc:
+                code: int = exc.code if isinstance(exc.code, int) else 1
+                if code == 0:
+                    self.enqueue_log(f"\n{name} completed successfully.\n", "ok")
+                else:
+                    self.enqueue_log(f"\n{name} finished with exit code {code}.\n", "warning")
             except Exception as exc:
                 print(f"Unhandled error during {name}: {exc}", file=sys.stderr)
             finally:

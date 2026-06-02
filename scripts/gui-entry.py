@@ -13,7 +13,10 @@ Run it locally with:
 
 from __future__ import annotations
 
+import multiprocessing
+
 from mkpfs.gui import run_gui
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     raise SystemExit(run_gui())
