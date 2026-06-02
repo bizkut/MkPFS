@@ -5,6 +5,8 @@ Run it locally with:
 
     uv run pyinstaller --onefile --windowed \
         --hidden-import tkinter \
+        --collect-data tkinter \
+        --collect-binaries tkinter \
         --collect-data customtkinter \
         scripts/gui-entry.py
 """
