@@ -654,6 +654,100 @@ class TestEncryptedImageRoundTrip(PfsTestCase):
         assert reported_deltas == [c.PFSC_LOGICAL_BLOCK_SIZE, 1234]
         assert sum(reported_deltas) == len(raw)
 
+    def test_pfsc_encode_keeps_equal_sized_compressed_block_raw(self) -> None:
+        """PFSC encoding must not store a compressed block whose span equals the logical block size."""
+        raw: bytes = (
+            (b"A" * c.PFSC_LOGICAL_BLOCK_SIZE)
+            + (b"B" * c.PFSC_LOGICAL_BLOCK_SIZE)
+            + (b"C" * c.PFSC_LOGICAL_BLOCK_SIZE)
+        )
+        real_compress: Callable[..., bytes] = pfs_mod.zlib.compress
+        compress_call_count: int = 0
+
+        def fake_compress(data: bytes, *, level: int) -> bytes:
+            """Force the first block to compress to exactly one logical block."""
+            nonlocal compress_call_count
+            compress_call_count += 1
+            if compress_call_count == 1:
+                return b"Z" * len(data)
+            return real_compress(data, level=level)
+
+        with patch.object(pfs_mod.zlib, "compress", side_effect=fake_compress):
+            encoded: bytes
+            _gain_pct: float
+            _hypothetical_size: int
+            encoded, _gain_pct, _hypothetical_size = pfs_mod.encode_pfsc_payload(
+                raw=raw,
+                threshold_gain=0,
+                zlib_level=9,
+                logical_block_size=c.PFSC_LOGICAL_BLOCK_SIZE,
+            )
+
+        _magic: int
+        _unk4: int
+        _unk8: int
+        logical_block_size: int
+        _logical_block_size_2: int
+        block_offsets_offset: int
+        _data_offset: int
+        _logical_size: int
+        (
+            _magic,
+            _unk4,
+            _unk8,
+            logical_block_size,
+            _logical_block_size_2,
+            block_offsets_offset,
+            _data_offset,
+            _logical_size,
+        ) = struct.unpack_from("<iiiiqqQq", encoded, 0)
+        offsets: tuple[int, int, int, int]
+        offsets = struct.unpack_from("<4Q", encoded, block_offsets_offset)
+        assert offsets[1] - offsets[0] == logical_block_size
+        assert offsets[2] - offsets[1] < logical_block_size
+        assert offsets[3] - offsets[2] < logical_block_size
+        assert pfs_mod.decode_pfsc_payload(payload=encoded, expected_logical_size=len(raw)) == raw
+
+    def test_pfsc_spool_keeps_equal_sized_compressed_block_raw(self) -> None:
+        """Streaming PFSC encoding must also reject equal-sized compressed block spans."""
+        tmp_path: Path = self.make_temp_path()
+        source_path: Path = tmp_path / "source.bin"
+        spool_path: Path = tmp_path / "out.pfsc"
+        raw: bytes = (
+            (b"A" * c.PFSC_LOGICAL_BLOCK_SIZE)
+            + (b"B" * c.PFSC_LOGICAL_BLOCK_SIZE)
+            + (b"C" * c.PFSC_LOGICAL_BLOCK_SIZE)
+        )
+        source_path.write_bytes(raw)
+        real_compress: Callable[..., bytes] = pfs_mod.zlib.compress
+        compress_call_count: int = 0
+
+        def fake_compress(data: bytes, *, level: int) -> bytes:
+            """Force the first streamed block to compress to exactly one logical block."""
+            nonlocal compress_call_count
+            compress_call_count += 1
+            if compress_call_count == 1:
+                return b"Z" * len(data)
+            return real_compress(data, level=level)
+
+        with patch.object(pfs_mod.zlib, "compress", side_effect=fake_compress):
+            stored_size: int
+            is_compressed: bool
+            _gain_pct: float
+            _hypothetical_size: int
+            stored_size, is_compressed, _gain_pct, _hypothetical_size = pfs_mod._encode_pfsc_file_to_spool(
+                abs_path=source_path,
+                spool_path=spool_path,
+                threshold_gain=0,
+                min_file_gain=0,
+                zlib_level=9,
+                logical_block_size=c.PFSC_LOGICAL_BLOCK_SIZE,
+                block_worker_count=1,
+            )
+        assert is_compressed
+        assert stored_size == spool_path.stat().st_size
+        assert pfs_mod.decode_pfsc_payload(payload=spool_path.read_bytes(), expected_logical_size=len(raw)) == raw
+
     def test_compute_file_storage_worker_batches_progress_updates(self) -> None:
         """Compression workers should batch byte deltas before reporting them upstream."""
 
@@ -813,6 +907,54 @@ class TestEncryptedImageRoundTrip(PfsTestCase):
 
         assert sequential_result == parallel_result
         assert sequential_spool.read_bytes() == parallel_spool.read_bytes()
+
+    def test_run_image_check_reports_logical_and_stored_bytes_for_compressed_files(self) -> None:
+        """Verify report output should label logical and stored byte counts correctly."""
+        tmp_path: Path = self.make_temp_path()
+        src: Path = tmp_path / "src"
+        src.mkdir(parents=True)
+        raw_payload: bytes = (
+            (b"A" * c.PFSC_LOGICAL_BLOCK_SIZE)
+            + (b"B" * c.PFSC_LOGICAL_BLOCK_SIZE)
+            + (b"C" * c.PFSC_LOGICAL_BLOCK_SIZE)
+        )
+        (src / "big.bin").write_bytes(raw_payload)
+        out: Path = tmp_path / "out.ffpfsc"
+        output_buffer: io.StringIO = io.StringIO()
+
+        build_pfs(
+            source_root=src,
+            output_path=out,
+            block_size=65536,
+            pfs_version=c.PFS_VERSION_PS4,
+            inode_bits=32,
+            case_insensitive=True,
+            signed=False,
+            compress=True,
+            threshold_gain=0,
+            cpu_count=1,
+            zlib_level=9,
+            dry_run=False,
+            verbose=False,
+            encrypted=False,
+        )
+
+        with patch("mkpfs.cli.info", side_effect=output_buffer.write):
+            errors: list[str]
+            _warnings: list[str]
+            _tree: dict[int, list[pfs_mod.ParsedDirent]]
+            _uroot: int
+            errors, _warnings, _tree, _uroot = run_image_check(
+                image=out,
+                source=src,
+                print_tree=False,
+                emit_report=True,
+            )
+
+        assert errors == []
+        report_text: str = output_buffer.getvalue()
+        assert "Logical file bytes:    196,608" in report_text
+        assert "Stored file bytes:     65,791" in report_text
 
     def test_compression_phase_emits_intermediate_progress_for_single_worker(self) -> None:
         """Single-worker compression should emit intermediate progress updates."""

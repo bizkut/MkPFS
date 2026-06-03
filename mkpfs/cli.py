@@ -441,8 +441,8 @@ def run_image_check(
                 )
 
             compressed_count = sum(1 for i in file_inodes.values() if inodes[i].is_compressed)
-            total_logical = sum(max(0, inodes[i].size) for i in file_inodes.values())
-            total_stored = sum(max(0, inodes[i].size_compressed) for i in file_inodes.values())
+            total_logical = sum(max(0, inodes[i].logical_size) for i in file_inodes.values())
+            total_stored = sum(max(0, inodes[i].stored_size) for i in file_inodes.values())
 
             if emit_report:
                 payload_magic: str = describe_magic(magic=consts.PFSC_MAGIC) if compressed_count > 0 else "none"
@@ -784,6 +784,12 @@ def _stage_single_file_source_root(*, source_file: Path, temp_folder: Path | Non
     The staged file is created as a hard link when possible, with a symlink
     fallback when hard linking is unavailable in the current environment.
 
+    On Windows, hard links cannot cross drives (WinError 17) and symlinks
+    require the "Create Symbolic Links" privilege (WinError 1314), which
+    most users lack. If ``source_file`` and ``temp_folder`` reside on
+    different devices, the staging directory is created next to the source
+    file instead so the hard link succeeds.
+
     Args:
         source_file: Existing source file that should appear at the temporary
             root path.
@@ -797,8 +803,19 @@ def _stage_single_file_source_root(*, source_file: Path, temp_folder: Path | Non
     Raises:
         BuildError: If no link strategy can stage the file.
     """
-    temp_root: Path = resolve_temp_root(temp_folder=temp_folder)
-    with tempfile.TemporaryDirectory(dir=str(temp_root)) as staging_dir_name:
+    # Determine the best location for the staging directory.
+    # On Windows, hardlinks cannot cross drives (WinError 17) and symlinks
+    # require the "Create Symbolic Links" privilege (WinError 1314), which
+    # most users lack. Prefer the user's temp_folder, but fall back to
+    # the source file's parent directory when they are on different drives.
+    _staging_base: Path = temp_folder if temp_folder is not None else source_file.parent
+    try:
+        if source_file.stat().st_dev != _staging_base.stat().st_dev:
+            _staging_base = source_file.parent
+    except OSError:
+        pass  # stat failed, keep original base
+
+    with tempfile.TemporaryDirectory(dir=str(_staging_base)) as staging_dir_name:
         staging_root: Path = Path(staging_dir_name)
         staging_file: Path = staging_root / source_file.name
         try:
@@ -1248,7 +1265,10 @@ def cli_mkpfs_main_parsers() -> argparse.ArgumentParser:
         source_help="Single source file to pack",
         include_require_game_files=False,
     )
-    file_parser.set_defaults(func=cli_mkpfs_pack_file_run)
+    file_parser.set_defaults(
+        inode_bits=32,
+        func=cli_mkpfs_pack_file_run,
+    )
 
     archive_parser = pack_sub.add_parser("archive", help="Build image from a ZIP or RAR archive")
     cli_mkpfs_add_create_args(

@@ -16,7 +16,15 @@ from unittest.mock import patch
 import mkpfs.cli as cli
 from mkpfs import consts
 from mkpfs.cli import cli_mkpfs_main
-from mkpfs.pfs import BuildError, BuildStats, ParsedDirent, PFSExtractionResult, PFSImageInfo, PFSImageInspection
+from mkpfs.pfs import (
+    BuildError,
+    BuildStats,
+    ParsedDirent,
+    PFSExtractionResult,
+    PFSImageInfo,
+    PFSImageInspection,
+    parse_image_header,
+)
 
 
 class CliTestCase(unittest.TestCase):
@@ -108,7 +116,7 @@ class CliTestCase(unittest.TestCase):
         )
 
 
-class TestCliSmokeIntegration(unittest.TestCase):
+class TestCliSmokeIntegration(CliTestCase):
     """Smoke tests for the installed CLI entrypoints and help output."""
 
     def test_top_level_help_prints_the_project_description(self) -> None:
@@ -155,6 +163,35 @@ class TestCliSmokeIntegration(unittest.TestCase):
         self.assertIn("source_file", result.stdout)
         self.assertIn("image_file", result.stdout)
         self.assertNotIn("--require-game-files", result.stdout)
+
+    def test_pack_file_defaults_to_32_bit_inodes_and_verify_source_file_succeeds(self) -> None:
+        """Single-file packing should keep 32-bit inode defaults and verify against the source file."""
+        tmp_path: Path = self.make_temp_path()
+        source_file: Path = tmp_path / "payload.bin"
+        image_path: Path = tmp_path / "output.ffpfsc"
+        source_file.write_bytes((b"A" * 200_000) + (b"B" * 150_000) + (b"C" * 50_000))
+
+        pack_result: subprocess.CompletedProcess[str] = subprocess.run(
+            [sys.executable, "-m", "mkpfs", "pack", "file", str(source_file), str(image_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(pack_result.returncode, 0, msg=pack_result.stdout + pack_result.stderr)
+        self.assertTrue(image_path.exists())
+
+        with image_path.open("rb") as image_handle:
+            header = parse_image_header(image_handle)
+        self.assertFalse(bool(header.mode & consts.PFS_MODE_64BIT_INODES))
+
+        verify_result: subprocess.CompletedProcess[str] = subprocess.run(
+            [sys.executable, "-m", "mkpfs", "verify", str(image_path), "--source-file", str(source_file)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(verify_result.returncode, 0, msg=verify_result.stdout + verify_result.stderr)
+        self.assertIn("Errors:                0", verify_result.stdout)
 
 
 class TestCliArgumentHelpers(CliTestCase):
@@ -212,6 +249,12 @@ class TestCliArgumentHelpers(CliTestCase):
             action for action in folder_parser._actions if getattr(action, "dest", "") == "inode_bits"
         )
         self.assertEqual(inode_bits_action.default, 32)
+
+    def test_pack_file_parser_uses_thirty_two_as_default_inode_bits(self) -> None:
+        """The pack file parser should stay pinned to 32-bit inodes by default."""
+        parser: argparse.ArgumentParser = cli.cli_mkpfs_main_parsers()
+        parsed_args: argparse.Namespace = parser.parse_args(["pack", "file", "src.bin", "out.ffpfsc"])
+        self.assertEqual(parsed_args.inode_bits, 32)
 
     def test_pack_parser_uses_ps4_as_default_version(self) -> None:
         """The pack parser should expose PS4 as the default pack profile version."""
@@ -1353,7 +1396,16 @@ class TestRunImageCheck(CliTestCase):
         image_path: Path = tmp_path / "image.ffpfs"
         image_path.write_bytes(b"x")
         header: SimpleNamespace = SimpleNamespace(mode=0, version=0, magic=123, readonly=1, block_size=65536)
-        inodes: list[SimpleNamespace] = [SimpleNamespace(number=0, is_compressed=False, size=100, size_compressed=90)]
+        inodes: list[SimpleNamespace] = [
+            SimpleNamespace(
+                number=0,
+                is_compressed=False,
+                size=100,
+                size_compressed=90,
+                logical_size=100,
+                stored_size=90,
+            )
+        ]
         with ExitStack() as stack:
             stack.enter_context(patch.object(cli, "parse_image_header", return_value=header))
             stack.enter_context(patch.object(cli, "parse_image_inodes", return_value=inodes))
@@ -1389,8 +1441,22 @@ class TestRunImageCheck(CliTestCase):
         image_path.write_bytes(b"x")
         header: SimpleNamespace = SimpleNamespace(mode=0, version=0, magic=123, readonly=1, block_size=65536)
         inodes: list[SimpleNamespace] = [
-            SimpleNamespace(number=0, is_compressed=False, size=10, size_compressed=10),
-            SimpleNamespace(number=99, is_compressed=False, size=10, size_compressed=10),
+            SimpleNamespace(
+                number=0,
+                is_compressed=False,
+                size=10,
+                size_compressed=10,
+                logical_size=10,
+                stored_size=10,
+            ),
+            SimpleNamespace(
+                number=99,
+                is_compressed=False,
+                size=10,
+                size_compressed=10,
+                logical_size=10,
+                stored_size=10,
+            ),
         ]
         with ExitStack() as stack:
             stack.enter_context(patch.object(cli, "parse_image_header", return_value=header))

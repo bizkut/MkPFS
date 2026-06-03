@@ -837,6 +837,33 @@ def _pfsc_header_size(*, block_count: int, logical_block_size: int) -> int:
     return consts.PFSC_INITIAL_DATA_OFFSET + (extra_blocks * logical_block_size)
 
 
+def _should_store_pfsc_block_compressed(
+    *,
+    compressed_block_size: int,
+    logical_block_size: int,
+    gain_pct: float,
+    threshold_gain: int,
+) -> bool:
+    """Return whether a PFSC block can be stored in compressed form.
+
+    PFSC decoding distinguishes raw and compressed blocks only by comparing the
+    stored block span with the logical block size. A compressed block must
+    therefore be strictly smaller than the logical block size, otherwise the
+    decoder interprets it as raw bytes and the payload becomes self-inconsistent.
+
+    Args:
+        compressed_block_size: Encoded zlib block length in bytes.
+        logical_block_size: PFSC logical block size in bytes.
+        gain_pct: Percent gain achieved by compressing the padded logical block.
+        threshold_gain: Minimum gain required to keep the compressed bytes.
+
+    Returns:
+        ``True`` when the block should be stored compressed, ``False`` when it
+        must remain raw.
+    """
+    return compressed_block_size < logical_block_size and gain_pct >= threshold_gain
+
+
 def encode_pfsc_payload(
     raw: bytes,
     threshold_gain: int,
@@ -881,8 +908,14 @@ def encode_pfsc_payload(
         compressed_block: bytes = zlib.compress(padded_block, level=zlib_level)
         all_compressed_size += len(compressed_block)
         gain_pct: float = ((len(padded_block) - len(compressed_block)) / len(padded_block)) * 100.0
-        chosen_block: bytes = compressed_block if gain_pct >= threshold_gain else padded_block
-        if chosen_block is compressed_block:
+        store_compressed: bool = _should_store_pfsc_block_compressed(
+            compressed_block_size=len(compressed_block),
+            logical_block_size=logical_block_size,
+            gain_pct=gain_pct,
+            threshold_gain=threshold_gain,
+        )
+        chosen_block: bytes = compressed_block if store_compressed else padded_block
+        if store_compressed:
             compressed_blocks += 1
         encoded_blocks.append(chosen_block)
         if progress_callback is not None:
@@ -1071,7 +1104,12 @@ def _analyze_pfsc_file_storage(
                 compressed_chunk: bytes = zlib.compress(padded_chunk, level=zlib_level)
                 all_compressed_size += len(compressed_chunk)
                 gain_pct: float = ((len(padded_chunk) - len(compressed_chunk)) / len(padded_chunk)) * 100.0
-                if gain_pct >= threshold_gain:
+                if _should_store_pfsc_block_compressed(
+                    compressed_block_size=len(compressed_chunk),
+                    logical_block_size=logical_block_size,
+                    gain_pct=gain_pct,
+                    threshold_gain=threshold_gain,
+                ):
                     chosen_payload_size += len(compressed_chunk)
                     compressed_blocks += 1
                 else:
@@ -1093,7 +1131,12 @@ def _analyze_pfsc_file_storage(
                 all_compressed_size += compressed_block_len
                 padded_block_len: int = logical_block_size
                 gain_pct: float = ((padded_block_len - compressed_block_len) / padded_block_len) * 100.0
-                if gain_pct >= threshold_gain:
+                if _should_store_pfsc_block_compressed(
+                    compressed_block_size=compressed_block_len,
+                    logical_block_size=logical_block_size,
+                    gain_pct=gain_pct,
+                    threshold_gain=threshold_gain,
+                ):
                     chosen_payload_size += compressed_block_len
                     compressed_blocks += 1
                 else:
@@ -1161,8 +1204,14 @@ def _encode_pfsc_file_to_spool(
                     compressed_chunk: bytes = zlib.compress(padded_chunk, level=zlib_level)
                     all_compressed_size += len(compressed_chunk)
                     gain_pct: float = ((len(padded_chunk) - len(compressed_chunk)) / len(padded_chunk)) * 100.0
-                    selected_chunk: bytes = compressed_chunk if gain_pct >= threshold_gain else padded_chunk
-                    if selected_chunk is compressed_chunk:
+                    store_compressed: bool = _should_store_pfsc_block_compressed(
+                        compressed_block_size=len(compressed_chunk),
+                        logical_block_size=logical_block_size,
+                        gain_pct=gain_pct,
+                        threshold_gain=threshold_gain,
+                    )
+                    selected_chunk: bytes = compressed_chunk if store_compressed else padded_chunk
+                    if store_compressed:
                         compressed_blocks += 1
                     spool_file.write(selected_chunk)
                     offsets.append(offsets[-1] + len(selected_chunk))
@@ -1183,8 +1232,14 @@ def _encode_pfsc_file_to_spool(
                     padded_chunk: bytes = raw_chunk.ljust(logical_block_size, b"\x00")
                     all_compressed_size += len(compressed_chunk)
                     gain_pct: float = ((len(padded_chunk) - len(compressed_chunk)) / len(padded_chunk)) * 100.0
-                    selected_chunk: bytes = compressed_chunk if gain_pct >= threshold_gain else padded_chunk
-                    if selected_chunk is compressed_chunk:
+                    store_compressed: bool = _should_store_pfsc_block_compressed(
+                        compressed_block_size=len(compressed_chunk),
+                        logical_block_size=logical_block_size,
+                        gain_pct=gain_pct,
+                        threshold_gain=threshold_gain,
+                    )
+                    selected_chunk: bytes = compressed_chunk if store_compressed else padded_chunk
+                    if store_compressed:
                         compressed_blocks += 1
                     spool_file.write(selected_chunk)
                     offsets.append(offsets[-1] + len(selected_chunk))
